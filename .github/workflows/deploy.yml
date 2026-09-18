@@ -10,10 +10,14 @@ name: Deploy site
 # preflight there answers 405. Discovery through the JSON API works; the bytes
 # do not. Copying them into the Pages artifact is what makes them readable.
 #
-# Which Release is deployed is set by the repository variable DEPLOY_RELEASE
-# (Settings -> Secrets and variables -> Actions -> Variables), and can be
-# overridden for one run from the Actions tab. A Release is bound one-to-one to
-# its tag, so this is a variable rather than a tag that moves.
+# Which Release is deployed is recorded in the DEPLOY_RELEASE file at the root
+# of this repository, so the deployed version is in git history like anything
+# else: edit that line, push, and the commit both triggers the deploy and
+# records what went live. A Release is bound one-to-one to its tag, so naming
+# one is not the same as moving a tag.
+#
+# Precedence: the workflow_dispatch input (one run only), then the file, then
+# the repository variable of the same name if anyone has set one.
 
 on:
   push:
@@ -21,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Release tag to deploy (defaults to the DEPLOY_RELEASE variable)"
+        description: "Release tag to deploy for this run only (defaults to the DEPLOY_RELEASE file)"
         required: false
         type: string
 
@@ -51,11 +55,22 @@ jobs:
       - name: Fetch the results from the Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release || vars.DEPLOY_RELEASE }}
+          TAG_INPUT: ${{ inputs.release }}
+          TAG_VAR: ${{ vars.DEPLOY_RELEASE }}
         run: |
           set -euo pipefail
+
+          # A manual run wins; otherwise the file in the repository; otherwise a
+          # repository variable, kept only so an existing one is not ignored.
+          TAG="${TAG_INPUT}"
+          if [ -z "${TAG}" ] && [ -f DEPLOY_RELEASE ]; then
+            TAG="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' DEPLOY_RELEASE \
+                   | grep -v '^$' | head -n 1 || true)"
+          fi
+          [ -n "${TAG}" ] || TAG="${TAG_VAR}"
+
           if [ -z "${TAG}" ]; then
-            echo "::warning::No release selected (set the DEPLOY_RELEASE variable); deploying the site with no data. The file picker will still work."
+            echo "::warning::No release named in the DEPLOY_RELEASE file; deploying the site with no data. The file picker will still work."
             exit 0
           fi
 

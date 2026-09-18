@@ -32,10 +32,27 @@ still never enter git history.
 Release asset (canonical)  ->  Actions downloads it  ->  Pages artifact  ->  browser
 ```
 
-Which Release is deployed is set by the repository variable `DEPLOY_RELEASE`
-(*Settings → Secrets and variables → Actions → Variables*), and can be
-overridden for a single run from the Actions tab. It is a variable rather than a
-moving tag because a Release is bound one-to-one to its tag.
+Which Release is deployed is recorded in the **`DEPLOY_RELEASE`** file at the
+root of this repository — one line holding a release tag. Deploying is therefore
+an ordinary commit:
+
+```bash
+# edit the tag on the last line of DEPLOY_RELEASE, then:
+git commit -am "Deploy v0.4.0" && git push
+```
+
+The push triggers the workflow, and the diff is the record of which results went
+live and when. Naming a tag here is not the same as moving one: a Release is
+bound one-to-one to its tag, and this file just points at one.
+
+An empty file deploys the site with no data, which is a perfectly good state —
+the file picker still works.
+
+To look at a different Release **without** changing what is deployed, run the
+workflow by hand with its `release` input (*Actions → Deploy site → Run
+workflow*, or `gh workflow run "Deploy site" -f release=<tag>`). That overrides
+the file for that run only and does not persist. A repository variable named
+`DEPLOY_RELEASE` is also honoured, but only when the file is absent.
 
 Anyone can also look at a Release that is **not** deployed: download its assets
 and open them with the file picker in the page header. `fetch` is blocked on
@@ -119,6 +136,7 @@ node tools/build-data-index.mjs data
 ## Layout
 
 ```
+DEPLOY_RELEASE          the release this site is deployed from
 index.html              the only page; everything else is routed in the hash
 css/app.css
 js/hyparquet.js         the pinned dependency, imported in one place
