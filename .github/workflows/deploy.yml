@@ -101,10 +101,24 @@ jobs:
           du -sh data
 
       - name: Assemble the site
+        env:
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           mkdir -p _site
           cp -r index.html css js _site/
+
+          # Pages serves everything with cache-control: max-age=600 and that is
+          # not configurable, so for ten minutes after a deploy a returning
+          # visitor can run a mix of old and new modules -- which is how a fixed
+          # site kept showing the old error. Stamping every internal reference
+          # with the commit makes each deploy a distinct set of URLs, so a page
+          # is always served whole: either all old or all new.
+          V="${SHA:0:12}"
+          perl -pi -e "s{(from \"\./[\w.-]+\.js)\"}{\$1?v=$V\"}g" _site/js/*.js
+          perl -pi -e "s{(src=\"js/[\w.-]+\.js)\"}{\$1?v=$V\"}g;
+                        s{(href=\"css/[\w.-]+\.css)\"}{\$1?v=$V\"}g" _site/index.html
+          grep -o 'v=[0-9a-f]\{12\}' _site/index.html | head -n 2
           [ -d data ] && cp -r data _site/ || true
           # Pages deployed from Actions does not run Jekyll, but this makes
           # that explicit and costs nothing.

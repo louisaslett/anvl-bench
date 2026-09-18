@@ -113,6 +113,20 @@ entirely and the site fails only once deployed.
 Parquet, because JSON cannot represent `NaN`, `±Inf` or `-0`, all of which occur
 in these results and all of which mean something specific.
 
+### Caching
+
+Pages serves everything with `cache-control: max-age=600`, and that is not
+configurable. Left alone, a returning visitor within ten minutes of a deploy can
+end up running **some** old modules and some new ones — which is exactly how a
+site that had already been fixed kept showing the old error.
+
+So the deploy step stamps every internal reference (`index.html` → `js/app.js`
+and `css/app.css`, and each module's relative imports) with the commit SHA.
+Each deploy is therefore a distinct set of URLs and a page is always served
+whole: all old, or all new. `index.html` itself is still cached for up to ten
+minutes, so a returning visitor may see the previous version for that long —
+but a self-consistent one, and a hard reload always gets the newest.
+
 ## Local development
 
 Generate an artifact from the sweep harness:
