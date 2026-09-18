@@ -54,6 +54,17 @@ darwin-arm64-cpu.zip
   bands.parquet  hist.parquet  ranges.parquet
 ```
 
+Note the files sit at the zip's **root**, not inside a folder. To pack an export
+sitting in `data/`:
+
+```bash
+mkdir -p dist && (cd data && zip -q -r ../dist/<id>.zip . -x '.*')
+```
+
+Pick an `<id>` that is unique within the Release: the platform key alone is
+enough when a Release carries one anvl version, which is the usual case. The
+dropdown's label comes from the manifest, not from this name.
+
 ## Reading strategy
 
 `detail.parquet` is ~46 MB and the site never downloads it. Both large tables

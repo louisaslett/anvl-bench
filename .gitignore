@@ -8,3 +8,6 @@ data/
 
 .DS_Store
 node_modules/
+
+# Packed release assets, built from data/ by the command in the README.
+dist/
