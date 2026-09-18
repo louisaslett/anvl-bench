@@ -99,6 +99,16 @@ The reader is [hyparquet](https://github.com/hyparam/hyparquet) (~10 kB, pure
 JS, no WASM), the only third-party dependency, pinned in `js/hyparquet.js`.
 DuckDB-WASM was rejected at ~30 MB — larger than the data it would read.
 
+One hosting detail the reader has to know about: **GitHub Pages gzips these
+responses**, including `application/octet-stream`, so a `HEAD` reports the
+*compressed* length — 12,625 where the file is 18,946. Taken as the file size
+that puts the Parquet footer read in the middle of the file
+(`footer != PAR1`). A ranged request, however, is answered from the
+uncompressed bytes and gives the true total in `content-range`, so that is
+where `js/source.js` gets the length from. `tools/serve.mjs` reproduces both
+behaviours, because a dev server that simply serves uncompressed hides this
+entirely and the site fails only once deployed.
+
 `manifest.json` is the only JSON in an artifact. Everything measured is
 Parquet, because JSON cannot represent `NaN`, `±Inf` or `-0`, all of which occur
 in these results and all of which mean something specific.

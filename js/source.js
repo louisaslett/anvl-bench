@@ -52,12 +52,42 @@ export async function listDeployed() {
   return [];
 }
 
+/**
+ * The true byte length of a remote file.
+ *
+ * Deliberately not from HEAD. GitHub Pages serves these files gzipped, so
+ * HEAD's content-length is the *compressed* size -- 12,625 where the file is
+ * 18,946. hyparquet would take that as the length, look for the footer eight
+ * bytes before it, land in the middle of the file and report
+ * "parquet file invalid (footer != PAR1)".
+ *
+ * A range request is answered from the uncompressed bytes and states the real
+ * total in content-range, which is the number that matters. This costs one
+ * extra one-byte request per table and makes the reader independent of whether
+ * the host compresses.
+ */
+async function byteLengthOf(url) {
+  const res = await fetch(url, { headers: { Range: "bytes=0-0" } });
+  const range = res.headers.get("content-range");
+  await res.body?.cancel();
+  if (res.status === 206 && range) {
+    const m = /\/\s*(\d+)\s*$/.exec(range);
+    if (m) return Number(m[1]);
+  }
+  // No usable range support: the whole read strategy is void here, but still
+  // answer correctly rather than with a wrong number.
+  return (await (await fetch(url)).arrayBuffer()).byteLength;
+}
+
 export async function urlSource(dir = "data") {
   const base = dir.replace(/\/*$/, "/");
   const res = await fetch(base + "manifest.json", { cache: "no-cache" });
   if (!res.ok) throw new Error(`no manifest at ${base}manifest.json (${res.status})`);
   const manifest = await res.json();
-  const buffer = memo((t) => asyncBufferFromUrl({ url: `${base}${t}.parquet` }));
+  const buffer = memo(async (t) => {
+    const url = `${base}${t}.parquet`;
+    return asyncBufferFromUrl({ url, byteLength: await byteLengthOf(url) });
+  });
   return { kind: "url", origin: base, manifest, buffer, has: (t) => TABLES.includes(t) };
 }
 

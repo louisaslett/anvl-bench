@@ -2,17 +2,41 @@
 //
 // It exists because Python's http.server does not implement Range requests,
 // and the whole read strategy here depends on them: hyparquet fetches a few
-// row groups out of a 46 MB Parquet file rather than the file. GitHub Pages
-// serves `accept-ranges: bytes`, so this mirrors production.
+// row groups out of a 46 MB Parquet file rather than the file.
+//
+// It also reproduces two GitHub Pages behaviours that together once broke the
+// deployed site while everything passed locally:
+//
+//   * Pages gzips these responses, including application/octet-stream, so a
+//     HEAD reports the COMPRESSED length. Anything that takes that as the file
+//     size reads the Parquet footer from the wrong offset.
+//   * A ranged request is nonetheless answered from the UNCOMPRESSED bytes,
+//     and content-range states the real total.
+//
+// Serving uncompressed here would hide that asymmetry, so this does not.
 //
 //   node tools/serve.mjs [port]
 
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
+import { gzipSync } from "node:zlib";
 
 const root = new URL("..", import.meta.url).pathname;
 const port = Number(process.argv[2] ?? 8099);
+
+// Compressing a 46 MB file on every request would make the server useless, so
+// keep the result until the file changes.
+const gzipCache = new Map();
+function gzipped(path, stat) {
+  const key = `${path}:${stat.mtimeMs}:${stat.size}`;
+  let hit = gzipCache.get(path);
+  if (!hit || hit.key !== key) {
+    hit = { key, body: gzipSync(readFileSync(path)) };
+    gzipCache.set(path, hit);
+  }
+  return hit.body;
+}
 
 const types = {
   ".html": "text/html; charset=utf-8",
@@ -48,6 +72,7 @@ createServer((req, res) => {
     "accept-ranges": "bytes",
     "cache-control": "no-cache",
   };
+  const compressible = !/^(image|video|audio)\//.test(type);
 
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? "");
   if (range) {
@@ -64,6 +89,20 @@ createServer((req, res) => {
       "content-length": end - start + 1,
     });
     return createReadStream(path, { start, end }).pipe(res);
+  }
+
+  // Unranged, and the client takes gzip: compress, exactly as Pages does. The
+  // content-length that goes out is therefore the compressed size.
+  const wantsGzip = /\bgzip\b/.test(req.headers["accept-encoding"] ?? "");
+  if (compressible && wantsGzip) {
+    const body = gzipped(path, stat);
+    res.writeHead(200, {
+      ...base,
+      "content-encoding": "gzip",
+      "vary": "Accept-Encoding",
+      "content-length": body.length,
+    });
+    return res.end(req.method === "HEAD" ? undefined : body);
   }
 
   res.writeHead(200, { ...base, "content-length": stat.size });
