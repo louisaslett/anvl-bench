@@ -82,12 +82,34 @@ function bucketOf(columns, from, to) {
   };
 }
 
+/** Worst log10 relative error of a comparator over the same binades. */
+function compareOf(columns, from, to, byKey) {
+  let present = false;
+  let err = null;
+  for (let i = from; i < to; i++) {
+    const c = byKey.get(`${columns[i].sign}:${columns[i].binade}`);
+    if (!c) continue;
+    present = true;
+    const e = c.worst_rel_err;
+    if (typeof e === "number" && e > 0 && Number.isFinite(e)) {
+      const l = Math.log10(e);
+      if (err === null || l > err) err = l;
+    }
+  }
+  return { present, err };
+}
+
 /**
  * The binade chart. `view` is the index range currently shown; clicking a bar
  * that covers more than one binade zooms into it, and clicking a single
  * binade selects it. Callers re-render on any state change.
+ *
+ * `compare`, when given, is another backend's bands for the same cell (today,
+ * JAX). It is drawn as an ink line over anvl's bars -- a different mark, not
+ * just a different colour -- on the same axis, since both are the same
+ * quantity: relative error against the same base R reference.
  */
-export function binadeChart({ bands, view, selected, onSelect, onView }) {
+export function binadeChart({ bands, view, selected, onSelect, onView, compare = null }) {
   const { columns, zeroAt, special } = orderBands(bands);
   const wrap = document.createElement("div");
   wrap.className = "chart";
@@ -102,15 +124,20 @@ export function binadeChart({ bands, view, selected, onSelect, onView }) {
   const n = i1 - i0;
   const nBuckets = Math.min(n, Math.floor(PLOT_W / 2));
   const buckets = [];
+  const cmpByKey = new Map(
+    (compare?.bands ?? []).filter((b) => !b.special).map((b) => [`${b.sign}:${b.binade}`, b]));
   for (let j = 0; j < nBuckets; j++) {
     const from = i0 + Math.floor((j * n) / nBuckets);
-    const to = i0 + Math.floor(((j + 1) * n) / nBuckets);
-    buckets.push(bucketOf(columns, from, Math.max(to, from + 1)));
+    const to = Math.max(i0 + Math.floor(((j + 1) * n) / nBuckets), from + 1);
+    const b = bucketOf(columns, from, to);
+    b.cmp = cmpByKey.size ? compareOf(columns, from, to, cmpByKey) : null;
+    buckets.push(b);
   }
 
   // Scale to the errors actually present, so an f64 result whose errors all sit
   // near 1e-16 still fills the chart instead of flattening against the axis.
-  const present = buckets.map((b) => b.err).filter((d) => d !== null);
+  // The comparator shares the axis, so its errors count toward the range too.
+  const present = buckets.flatMap((b) => [b.err, b.cmp?.err ?? null]).filter((d) => d !== null);
   const dMax = present.length ? Math.ceil(Math.max(...present)) : 0;
   let dMin = present.length ? Math.floor(Math.min(...present)) : -1;
   if (dMax - dMin < 1) dMin = dMax - 1;
@@ -172,8 +199,11 @@ export function binadeChart({ bands, view, selected, onSelect, onView }) {
       : `binade ${wb.binade} \u2014 click to inspect`;
     const tip =
       `${spanTxt}\n${wb.sign < 0 ? MINUS : "+"} ${num(Math.abs(wb.x_from))} \u2026 ${num(Math.abs(wb.x_to))}\n` +
-      `worst rel err ${b.err === null ? "none" : num(wb.worst_rel_err, 3)}\n` +
-      `${b.behaviour ?? "several behaviours"}`;
+      `anvl worst rel err ${b.err === null ? "none" : num(10 ** b.err, 3)}` +
+      ` (${b.behaviour ?? "several behaviours"})` +
+      (b.cmp
+        ? `\n${compare.label} worst rel err ${!b.cmp.present ? "not swept" : b.cmp.err === null ? "none" : num(10 ** b.cmp.err, 3)}`
+        : "");
     rect.append(el("title", {}, document.createTextNode(tip)));
     g.append(rect);
 
@@ -193,7 +223,40 @@ export function binadeChart({ bands, view, selected, onSelect, onView }) {
     });
     hits.append(hit);
   });
-  svg.append(g, hits);
+  svg.append(g);
+
+  // The comparator's line: a step across each bucket, broken wherever it has no
+  // band at all, and resting on the baseline where it has one with no error.
+  if (buckets.some((b) => b.cmp?.present)) {
+    const base = PAD.t + PLOT_H;
+    let d = "";
+    let open = false;
+    let last = null;
+    buckets.forEach((b, j) => {
+      if (!b.cmp?.present) { open = false; return; }
+      const yv = (b.cmp.err === null ? base : y(b.cmp.err)).toFixed(2);
+      const x0 = (PAD.l + j * bw).toFixed(2);
+      const x1 = (PAD.l + (j + 1) * bw).toFixed(2);
+      d += open ? `L${x0},${yv}L${x1},${yv}` : `M${x0},${yv}L${x1},${yv}`;
+      open = true;
+      if (b.cmp.err !== null) last = { x: Number(x1), y: Number(yv) };
+    });
+    svg.append(
+      el("path", { class: "cmp-halo", d }),
+      el("path", { class: "cmp-line", d }),
+    );
+    // Label the line directly, so identity never rests on the legend alone.
+    if (last) {
+      svg.append(el("text", {
+        class: "cmp-label",
+        x: Math.min(last.x, W - PAD.r - 2).toFixed(1),
+        y: Math.max(last.y - 5, PAD.t + 9).toFixed(1),
+        "text-anchor": "end",
+      }, document.createTextNode(compare.label)));
+    }
+  }
+  // Hit targets last, so the line never intercepts a click.
+  svg.append(hits);
 
   // the sign change, when it is inside the view
   if (zeroAt > i0 && zeroAt < i1) {
@@ -244,18 +307,28 @@ export function binadeChart({ bands, view, selected, onSelect, onView }) {
   return { wrap, columns, zeroAt, nColumns: columns.length, view: [i0, i1] };
 }
 
-/** The error histogram: 25 decades, counts on a log scale. */
-export function histChart(rows) {
+/**
+ * The error histogram: counts by decade, on a log scale. A comparator, when
+ * given, is drawn as an ink step outline over the bars, on the same axes --
+ * both are counts of the same number of samples, so they compare directly.
+ */
+export function histChart(rows, compare = null) {
   const wrap = document.createElement("div");
   wrap.className = "chart";
-  const data = [...rows].sort((a, b) => a.decade - b.decade);
-  if (!data.length || data.every((d) => !d.count)) {
+  const cmpBy = new Map((compare?.rows ?? []).map((d) => [d.decade, d.count]));
+  const decades = [...new Set([...rows.map((d) => d.decade), ...cmpBy.keys()])].sort((a, b) => a - b);
+  const mine = new Map(rows.map((d) => [d.decade, d.count]));
+  const data = decades.map((decade) => ({
+    decade, count: mine.get(decade) ?? 0, cmp: cmpBy.has(decade) ? cmpBy.get(decade) : null,
+  }));
+  const any = (d) => d.count > 0 || d.cmp > 0;
+  if (!data.some(any)) {
     wrap.innerHTML = '<p class="muted">No finite errors recorded for this result.</p>';
     return wrap;
   }
   // Trim empty decades at both ends so the occupied range fills the chart.
-  let lo = data.findIndex((d) => d.count > 0);
-  let hi = data.length - 1 - [...data].reverse().findIndex((d) => d.count > 0);
+  let lo = data.findIndex(any);
+  let hi = data.length - 1 - [...data].reverse().findIndex(any);
   lo = Math.max(0, lo - 1);
   hi = Math.min(data.length - 1, hi + 1);
   const shown = data.slice(lo, hi + 1);
@@ -264,7 +337,7 @@ export function histChart(rows) {
   const pad = { l: 52, r: 12, t: 10, b: 30 };
   const pw = W - pad.l - pad.r;
   const ph = h - pad.t - pad.b;
-  const max = Math.max(...shown.map((d) => d.count));
+  const max = Math.max(...shown.map((d) => Math.max(d.count, d.cmp ?? 0)));
   const scale = (c) => (c <= 0 ? 0 : (Math.log10(c + 1) / Math.log10(max + 1)) * ph);
 
   const svg = el("svg", { viewBox: `0 0 ${W} ${h}`, class: "hist-svg", role: "img",
@@ -272,6 +345,7 @@ export function histChart(rows) {
   svg.append(el("text", { class: "axis-title", x: 6, y: pad.t + 4 },
     document.createTextNode("samples (log)")));
   const bw = pw / shown.length;
+  const hits = [];
   shown.forEach((d, j) => {
     const bh = scale(d.count);
     const x = pad.l + j * bw;
@@ -279,10 +353,16 @@ export function histChart(rows) {
       class: "hbar", x: (x + bw * 0.1).toFixed(2), width: (bw * 0.8).toFixed(2),
       y: (pad.t + ph - bh).toFixed(2), height: Math.max(bh, d.count > 0 ? 1 : 0).toFixed(2),
     });
-    rect.append(el("title", {}, document.createTextNode(
+    const tip =
       `rel err 1e${String(d.decade).replace("-", MINUS)} – 1e${String(d.decade + 1).replace("-", MINUS)}\n` +
-      `${d.count.toLocaleString("en-US")} samples`)));
+      `anvl: ${d.count.toLocaleString("en-US")} samples` +
+      (compare ? `\n${compare.label}: ${(d.cmp ?? 0).toLocaleString("en-US")} samples` : "");
+    rect.append(el("title", {}, document.createTextNode(tip)));
     svg.append(rect);
+    // Hover works on the whole decade, not only where anvl has a bar.
+    const hit = el("rect", { class: "hhit", x: x.toFixed(2), width: bw.toFixed(2), y: pad.t, height: ph });
+    hit.append(el("title", {}, document.createTextNode(tip)));
+    hits.push(hit);
     if (shown.length <= 14 || j % 2 === 0) {
       svg.append(el("text", { class: "tick", x: (x + bw / 2).toFixed(1), y: h - 10,
         "text-anchor": "middle" }, document.createTextNode(decadeTick(d.decade))));
@@ -290,6 +370,26 @@ export function histChart(rows) {
   });
   svg.append(el("line", { class: "axis", x1: pad.l, x2: W - pad.r,
     y1: pad.t + ph, y2: pad.t + ph }));
+
+  if (compare && shown.some((d) => d.cmp !== null)) {
+    let d = "";
+    let last = null;
+    shown.forEach((s, j) => {
+      const yv = (pad.t + ph - scale(s.cmp ?? 0)).toFixed(2);
+      const x0 = (pad.l + j * bw).toFixed(2);
+      const x1 = (pad.l + (j + 1) * bw).toFixed(2);
+      d += `${j ? "L" : "M"}${x0},${yv}L${x1},${yv}`;
+      if (s.cmp > 0) last = { x: Number(x1), y: Number(yv) };
+    });
+    svg.append(el("path", { class: "cmp-halo", d }), el("path", { class: "cmp-line", d }));
+    if (last) {
+      svg.append(el("text", {
+        class: "cmp-label", "text-anchor": "end",
+        x: Math.min(last.x, W - pad.r - 2).toFixed(1), y: Math.max(last.y - 5, pad.t + 9).toFixed(1),
+      }, document.createTextNode(compare.label)));
+    }
+  }
+  svg.append(...hits);
   wrap.append(svg);
   return wrap;
 }

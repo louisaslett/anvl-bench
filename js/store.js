@@ -113,17 +113,41 @@ export async function openStore(source) {
   const results = summary.map((r) => ({ ...r, key: r.cell_id + SEP + r.output }));
   const byKey = new Map(results.map((r) => [r.key, r]));
 
-  const specs = [...new Set(results.map((r) => r.spec))].sort();
-  const bySpec = new Map(specs.map((s) => [s, results.filter((r) => r.spec === s)]));
+  // anvl is what this site is about; any other backend (today, JAX) is a
+  // comparator, measured against the same base R reference on the same inputs.
+  // Everything navigable and every aggregate is built from the subject rows
+  // only -- otherwise a JAX result would be counted as one of anvl's -- and a
+  // comparator is reached solely as the twin of an anvl result.
+  const backends = [...new Set(results.map((r) => r.backend))].sort();
+  const primary = backends.includes("anvl") ? "anvl" : backends[0];
+  const comparators = backends.filter((b) => b !== primary);
+  const subject = results.filter((r) => r.backend === primary);
+
+  /** cell_id is spec/backend/...; a twin differs only in that segment. */
+  const twinId = (cellId, backend) => {
+    const parts = String(cellId).split("/");
+    parts[1] = backend;
+    return parts.join("/");
+  };
+  /** The comparator's result for the same cell and output, if it has one. */
+  const twin = (r, backend = comparators[0]) =>
+    backend === undefined ? undefined : byKey.get(twinId(r.cell_id, backend) + SEP + r.output);
+
+  const specs = [...new Set(subject.map((r) => r.spec))].sort();
+  const bySpec = new Map(specs.map((s) => [s, subject.filter((r) => r.spec === s)]));
   const runById = new Map(runs.map((r) => [r.run_id, r]));
 
   return {
     source,
     manifest,
-    summary: results,
+    summary: subject,
     runs,
     runById,
     specs,
+    primary,
+    comparators,
+    twin,
+    twinId,
     bySpec: (s) => bySpec.get(s) ?? [],
     result: (cellId, output) => byKey.get(cellId + SEP + output),
     cellRows,

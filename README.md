@@ -13,6 +13,22 @@ presents their results.
 > reference these sweeps compare against, not an oracle, and in places it is the
 > weaker implementation. The site is worded accordingly.
 
+## Comparing with JAX
+
+When an artifact also holds JAX results (the harness's `--backends anvl,jax`),
+the site treats **anvl as the subject and JAX as a comparator**: both measured
+against the same base R reference, on the same inputs. The overview and every
+count stay anvl's alone — a JAX result is never counted as one of anvl's. JAX
+appears beside anvl on each function's page, and on each result page as a
+second column of figures, an ink line over the binade chart and the histogram,
+and a tab on the worst inputs. Variants JAX does not offer (for example
+`log_p = TRUE` quantiles) say so rather than showing blanks.
+
+JAX is always drawn as a line over anvl's filled marks, so the two are told apart
+by the kind of mark and a direct label, not by one more colour. The binade
+behaviour colours were chosen with a colour-vision validator and pass in both
+light and dark mode.
+
 ## How the results get here
 
 Results are **never committed to this repository**. They are published as assets

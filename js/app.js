@@ -40,8 +40,12 @@ const table = (headers, rows) =>
   h("div.table-wrap", { tabindex: "0", role: "region", "aria-label": "results" },
     h("table.grid", {},
       h("thead", {}, h("tr", {}, headers.map((c) =>
-        h("th", { class: c.align === "r" ? "r" : null, title: c.hint ?? null }, c.label ?? c)))),
+        h("th", { class: [c.align === "r" ? "r" : null, c.cls].filter(Boolean).join(" ") || null,
+        title: c.hint ?? null }, c.label ?? c)))),
       h("tbody", {}, rows)));
+
+/** How a backend is named on screen. */
+const backendLabel = (b) => ({ anvl: "anvl", jax: "JAX" })[b] ?? b;
 
 // --- routes ------------------------------------------------------------
 
@@ -73,6 +77,7 @@ const app = {
   deployed: [],
   chartView: null, // zoom range, reset whenever the result changes
   chartCell: null,
+  detailBackend: null, // whose worst inputs are listed; reset with the result
 };
 
 const main = () => document.getElementById("main");
@@ -153,6 +158,14 @@ function renderOverview() {
     `Every function is swept against base R over float bit patterns: exhaustively in f32, ` +
     `and one sample per 2`, h("sup", {}, "32"), `-block in f64. `,
     int(all.samples), ` samples across `, int(all.n), ` results.`));
+  if (s.comparators.length) {
+    const cmp = backendLabel(s.comparators[0]);
+    const nTwin = s.summary.filter((r) => s.twin(r)).length;
+    out.push(h("p.lede", {},
+      `${cmp} is swept alongside as a comparator, against the same base R reference and on the same inputs. `,
+      `${nTwin} of ${all.n} anvl results have a ${cmp} equivalent; the rest are variants ${cmp} does not offer. `,
+      `Every figure on this page is anvl's own \u2014 the comparison is on each function's page and each result's page.`));
+  }
 
   // The headline: where disagreement is left unexplained by NaN, subnormals or
   // the edges of the support.
@@ -243,6 +256,21 @@ let specSort = "worst";
 function renderSpec(spec) {
   const s = app.store;
   const rows = s.bySpec(spec);
+  const cmp = s.comparators[0];
+  // The comparator's figures for the same cell, beside anvl's. No verdict
+  // column: the two numbers are shown and the reader compares them.
+  const cmpCells = (r) => {
+    if (!cmp) return null;
+    const t = s.twin(r, cmp);
+    if (!t) {
+      return h("td.muted.cmp.none", { colspan: 2, title: `${backendLabel(cmp)} has no equivalent of this variant` },
+        `no ${backendLabel(cmp)} equivalent`);
+    }
+    return [
+      h("td.r.cmp", {}, num(t.worst_rel_err, 3)),
+      h("td.r.cmp", {}, pct(t.n_exact / t.n_samples)),
+    ];
+  };
   if (!rows.length) return setStatus(`No results for ${spec} in this artifact.`, "error");
   const a = aggregate(rows);
 
@@ -250,16 +278,16 @@ function renderSpec(spec) {
   const body = sorted.map((r) => h("tr", { class: isUnexplained(r) ? "row-warn" : null },
     h("td", {}, h("a", { href: cellHref(r.cell_id, r.output) },
       h("span.dt", {}, r.dtype), " ", r.kind, " ", h("span.muted", {}, r.param_set))),
-    h("td", {}, flagList(r.flags).map((f) => h("span.chip.flag", {}, f))),
+    h("td.flags", {}, flagList(r.flags).map((f) => h("span.chip.flag", {}, f))),
     h("td", {}, h("code", {}, r.output)),
     h("td.r", {}, num(r.worst_rel_err, 3)),
     h("td.r", {}, num(r.worst_ulp_err, 3)),
     h("td.r", {}, pct(r.n_exact / r.n_samples)),
-    h("td.r.muted", {}, int(r.n_samples)),
     h("td", {}, isUnexplained(r)
       ? h("a.pill.warn", { href: cellHref(r.cell_id, r.output) },
         `${num(Math.abs(r.unexplained_from), 2)} … ${num(Math.abs(r.unexplained_to), 2)}`)
-      : h("span.pill.ok", {}, "✓"))));
+      : h("span.pill.ok", {}, "✓")),
+    cmpCells(r)));
 
   const sortSel = h("select", { onchange: (e) => { specSort = e.target.value; renderSpec(spec); } },
     [["worst", "worst relative error"], ["ulp", "worst ulp error"],
@@ -269,7 +297,7 @@ function renderSpec(spec) {
   main().replaceChildren(
     h("nav.crumbs", {}, h("a", { href: "#/" }, "overview"), " / ", h("span", {}, spec)),
     h("h1", {}, spec),
-    h("p.lede", {}, `${a.n} results, ${int(a.samples)} samples. `,
+    h("p.lede", {}, `${a.n} results, ${int(a.samples)} samples in all. `,
       a.unexplained
         ? h("strong", {}, `${a.unexplained} with unexplained disagreement.`)
         : "All disagreement with base R is explained."),
@@ -279,8 +307,13 @@ function renderSpec(spec) {
       "flags",
       { label: "output", hint: "value, or the argument differentiated" },
       { label: "worst rel err", align: "r" }, { label: "worst ulp", align: "r" },
-      { label: "bit-identical", align: "r" }, { label: "samples", align: "r" },
+      { label: "bit-identical", align: "r" },
       { label: "unexplained", hint: "range of x where disagreement is not explained by NaN, subnormals or the edge of the support" },
+      // anvl's own columns first; the comparator's follow as an appendix.
+      ...(cmp ? [
+        { label: `${backendLabel(cmp)} worst rel err`, align: "r", cls: "cmp", hint: `${backendLabel(cmp)}, on the same inputs, against the same base R reference` },
+        { label: `${backendLabel(cmp)} bit-identical`, align: "r" },
+      ] : []),
     ], body));
 }
 
@@ -292,9 +325,60 @@ async function renderCell(cellId, output, binade) {
   if (!r) return setStatus(`No result for ${cellId} / ${output} in this artifact.`, "error");
   const parts = cellParts(cellId);
 
-  // Zooming is per result; moving to another one starts from the full range.
+  // The comparator's twin: the same cell and output, from another backend. Only
+  // anvl's results are compared; a comparator is never a page's subject.
+  const cmp = r.backend === s.primary ? s.comparators[0] : undefined;
+  const t = cmp ? s.twin(r, cmp) : undefined;
+  const cmpLabel = cmp ? backendLabel(cmp) : null;
+  const me = backendLabel(r.backend);
+
+  // Zooming and the worst-inputs tab are per result; a new one starts fresh.
   const key = `${cellId}/${output}`;
-  if (app.chartCell !== key) { app.chartCell = key; app.chartView = null; }
+  if (app.chartCell !== key) {
+    app.chartCell = key;
+    app.chartView = null;
+    app.detailBackend = null;
+  }
+
+  const STATS = [
+    ["worst relative error", (x) => num(x.worst_rel_err)],
+    ["worst ulp error", (x) => num(x.worst_ulp_err)],
+    ["bit-identical to base R", (x) => pct(x.n_exact / x.n_samples)],
+    ["worst at x", (x) => [num(x.worst_x), " ", h("code.bits", {}, x.worst_bits ?? "")]],
+    ["its value there", (x) => num(x.worst_value)],
+    ["base R there", (x) => num(x.worst_reference)],
+    ["samples", (x) => int(x.n_samples)],
+  ];
+  const stats = t
+    ? h("div.compare", {}, table(
+      [{ label: "" }, { label: me, align: "r" }, { label: cmpLabel, align: "r" }],
+      STATS.map(([k, f]) => h("tr", {},
+        h("th", { scope: "row" }, k), h("td.r", {}, f(r)), h("td.r.cmp", {}, f(t))))))
+    : h("dl.stats", {}, STATS.map(([k, f]) => h("div.stat", {}, h("dt", {}, k), h("dd", {}, f(r)))));
+
+  const between = (x) => [h("code", {}, num(x.unexplained_from)), " and ", h("code", {}, num(x.unexplained_to))];
+  const twinSays = t
+    ? (isUnexplained(t)
+      ? h("p", {}, `${cmpLabel} also disagrees with base R somewhere nothing explains, between `, between(t),
+        ". Where both implementations part company with base R in the same place, the reference itself is worth a look.")
+      : h("p", {}, `${cmpLabel}'s disagreements with base R on this cell are all explained.`))
+    : null;
+  const callout = isUnexplained(r)
+    ? h("div.callout.warn", {},
+      h("strong", {}, "Unexplained disagreement"),
+      h("p", {}, "Between ", between(r),
+        ` ${me} and base R differ for reasons not accounted for by NaN, subnormal flush-to-zero, or the edges of the support. `,
+        h("span.muted", {}, "Which of the two is closer to the true value is a separate question; base R is the reference, not an oracle.")),
+      twinSays)
+    : (t && isUnexplained(t)
+      ? h("div.callout", {},
+        h("strong", {}, `${cmpLabel} disagrees here; ${me} does not`),
+        h("p", {}, `Between `, between(t), ` ${cmpLabel} differs from base R for reasons nothing explains. Every disagreement ${me} has on this cell is explained.`))
+      : null);
+
+  const noTwin = !t && s.comparators.length && r.backend === s.primary
+    ? h("p.note", {}, `${backendLabel(s.comparators[0])} has no equivalent of this variant, so there is nothing to compare it with here.`)
+    : null;
 
   const head = [
     h("nav.crumbs", {},
@@ -306,24 +390,10 @@ async function renderCell(cellId, output, binade) {
       h("span.muted", {}, parts.kind === "grad" ? `d/d${output}` : "value")),
     h("div.chips", {}, h("span.chip", {}, parts.param_set),
       flagList(parts.flags).map((f) => h("span.chip.flag", {}, f)),
-      h("span.chip", {}, parts.backend)),
-    h("dl.stats", {}, [
-      ["worst relative error", num(r.worst_rel_err)],
-      ["worst ulp error", num(r.worst_ulp_err)],
-      ["bit-identical", [pct(r.n_exact / r.n_samples),
-        h("span.muted", {}, ` of ${int(r.n_samples)}`)]],
-      ["worst at x", [num(r.worst_x), " ", h("code.bits", {}, r.worst_bits ?? "")]],
-      ["anvl there", num(r.worst_value)],
-      ["base R there", num(r.worst_reference)],
-    ].map(([k, v]) => h("div.stat", {}, h("dt", {}, k), h("dd", {}, v)))),
-    isUnexplained(r)
-      ? h("div.callout.warn", {},
-        h("strong", {}, "Unexplained disagreement"),
-        h("p", {}, "Between ", h("code", {}, num(r.unexplained_from)), " and ",
-          h("code", {}, num(r.unexplained_to)),
-          " anvl and base R differ for reasons not accounted for by NaN, subnormal flush-to-zero, or the edges of the support. ",
-          h("span.muted", {}, "Which of the two is closer to the true value is a separate question; base R is the reference, not an oracle.")))
-      : null,
+      h("span.chip", {}, me), t ? h("span.chip", {}, `compared with ${cmpLabel}`) : null),
+    stats,
+    noTwin,
+    callout,
   ];
 
   const slots = {
@@ -336,18 +406,21 @@ async function renderCell(cellId, output, binade) {
     ...head.filter(Boolean), slots.bands, slots.hist, slots.detail, slots.ranges);
 
   const forOutput = (rows) => rows.filter((x) => x.output === output);
-  const [bands, hist, detail, ranges] = await Promise.all([
-    s.cellRows("bands", cellId).then(forOutput),
-    s.cellRows("hist", cellId).then(forOutput),
-    s.cellRows("detail", cellId).then(forOutput),
-    s.cellRows("ranges", cellId).then(forOutput),
+  const rowsOf = (tbl, id) => (id ? s.cellRows(tbl, id).then(forOutput) : Promise.resolve([]));
+  const tId = t?.cell_id ?? null;
+  const [bands, hist, detail, ranges, tBands, tHist, tDetail, tRanges] = await Promise.all([
+    rowsOf("bands", cellId), rowsOf("hist", cellId), rowsOf("detail", cellId), rowsOf("ranges", cellId),
+    rowsOf("bands", tId), rowsOf("hist", tId), rowsOf("detail", tId), rowsOf("ranges", tId),
   ]);
+
+  const cmpKey = t ? h("span.key-item", {}, h("i.k-cmp"), `${cmpLabel} (line)`) : null;
 
   const drawBands = () => {
     const chart = binadeChart({
       bands,
       view: app.chartView,
       selected: binade,
+      compare: t ? { label: cmpLabel, bands: tBands } : null,
       onSelect: (i) => {
         if (i && i.special) return; // the top field has no index on the axis
         const idx = typeof i === "number" ? i : null;
@@ -358,11 +431,12 @@ async function renderCell(cellId, output, binade) {
     const zoomed = app.chartView !== null;
     slots.bands.replaceChildren(
       h("h2", {}, "Worst relative error by binade"),
-      h("p.note", {}, "The axis is the real line in bit-pattern order. Each bar is one binade, or, where they do not fit, the worst of several — click to zoom in, then click a single binade to inspect it."),
+      h("p.note", {}, "The axis is the real line in bit-pattern order. Each bar is one binade, or, where they do not fit, the worst of several — click to zoom in, then click a single binade to inspect it.",
+        t ? ` The line is ${cmpLabel}'s worst relative error over the same binades, against the same base R reference; it breaks where ${cmpLabel} was not swept and rests on the axis where it matches base R exactly.` : ""),
       chart.wrap ?? chart,
       h("div.chart-foot", {},
         h("div.key", {}, Object.values(BEHAVIOUR).map((b) =>
-          h("span.key-item", {}, h("i", { class: b.cls }), b.label))),
+          h("span.key-item", {}, h("i", { class: b.cls }), b.label)), cmpKey),
         zoomed
           ? h("button.link", { onclick: () => { app.chartView = null; drawBands(); } },
             `showing ${app.chartView[1] - app.chartView[0]} of ${chart.nColumns} binades — reset`)
@@ -371,41 +445,61 @@ async function renderCell(cellId, output, binade) {
   };
   drawBands();
 
-  slots.hist.replaceChildren(h("h2", {}, "Distribution of relative error"), histChart(hist));
+  slots.hist.replaceChildren(
+    h("h2", {}, "Distribution of relative error"),
+    histChart(hist, t ? { label: cmpLabel, rows: tHist } : null),
+    t ? h("div.chart-foot", {}, h("div.key", {},
+      h("span.key-item", {}, h("i.k-anvl"), `${me} (bars)`), cmpKey)) : null,
+  );
 
-  // The worst inputs, narrowed to the selected binade when there is one.
+  // The worst inputs, narrowed to the selected binade when there is one. The
+  // binade is chosen on anvl's axis, and matched by (sign, binade) -- which is
+  // the same interval for any backend at the same precision.
   const ordered = bands.filter((b) => !b.special)
     .sort((a, b) => (a.sign < 0 ? -1 : 1) - (b.sign < 0 ? -1 : 1) ||
       (a.sign < 0 ? b.binade - a.binade : a.binade - b.binade));
-  const sel = binade === null ? null : (() => {
-    const { columns } = { columns: ordered };
-    return columns[binade] ?? null;
-  })();
-  const shown = sel
-    ? detail.filter((d) => d.binade === sel.binade && d.sign === sel.sign)
-    : [...detail].sort((a, b) => (b.rel_err ?? -1) - (a.rel_err ?? -1)).slice(0, 25);
+  const sel = binade === null ? null : ordered[binade] ?? null;
 
-  slots.detail.replaceChildren(
-    h("h2", {}, "Worst inputs"),
-    sel
-      ? h("p.note", {}, `Binade ${sel.binade}, ${sel.sign < 0 ? "negative" : "positive"}: `,
-        h("code", {}, num(sel.x_from)), " … ", h("code", {}, num(sel.x_to)), ". ",
-        h("a", { href: cellHref(cellId, output) }, "show the worst overall instead"))
-      : h("p.note", {}, "The 25 largest relative errors across the whole sweep. Click a binade in the chart above to narrow to it."),
-    shown.length
-      ? table([
-        { label: "bits" }, { label: "x", align: "r" },
-        { label: "anvl", align: "r" }, { label: "base R", align: "r" },
-        { label: "rel err", align: "r" }, { label: "ulp", align: "r" },
-      ], shown.slice(0, 200).map((d) => h("tr", {},
-        h("td", {}, h("code.bits", {}, d.bits ?? "")),
-        h("td.r", {}, num(d.x)),
-        h("td.r", {}, num(d.value)),
-        h("td.r", {}, num(d.reference)),
-        h("td.r", {}, num(d.rel_err, 3)),
-        h("td.r", {}, num(d.ulp_err, 3)))))
-      : h("p.muted", {}, "No differing samples recorded here."),
-  );
+  const drawDetail = () => {
+    const which = t && app.detailBackend === cmp ? cmp : r.backend;
+    const rows = which === r.backend ? detail : tDetail;
+    const shown = sel
+      ? rows.filter((d) => d.binade === sel.binade && d.sign === sel.sign)
+      : [...rows].sort((a, b) => (b.rel_err ?? -1) - (a.rel_err ?? -1)).slice(0, 25);
+    const tabs = t
+      ? h("div.seg", { role: "tablist", "aria-label": "whose worst inputs" },
+        [r.backend, cmp].map((b) => h("button", {
+          role: "tab",
+          "aria-selected": String(which === b),
+          class: which === b ? "on" : null,
+          onclick: () => { app.detailBackend = b; drawDetail(); },
+        }, backendLabel(b))))
+      : null;
+    slots.detail.replaceChildren(
+      h("h2", {}, "Worst inputs"),
+      tabs,
+      sel
+        ? h("p.note", {}, `Binade ${sel.binade}, ${sel.sign < 0 ? "negative" : "positive"}: `,
+          h("code", {}, num(sel.x_from)), " … ", h("code", {}, num(sel.x_to)), ". ",
+          h("a", { href: cellHref(cellId, output) }, "show the worst overall instead"))
+        : h("p.note", {}, "The 25 largest relative errors across the whole sweep. Click a binade in the chart above to narrow to it.",
+          t ? ` Each backend's worst inputs are its own, so the two lists are generally at different x.` : ""),
+      shown.length
+        ? table([
+          { label: "bits" }, { label: "x", align: "r" },
+          { label: backendLabel(which), align: "r" }, { label: "base R", align: "r" },
+          { label: "rel err", align: "r" }, { label: "ulp", align: "r" },
+        ], shown.slice(0, 200).map((d) => h("tr", {},
+          h("td", {}, h("code.bits", {}, d.bits ?? "")),
+          h("td.r", {}, num(d.x)),
+          h("td.r", {}, num(d.value)),
+          h("td.r", {}, num(d.reference)),
+          h("td.r", {}, num(d.rel_err, 3)),
+          h("td.r", {}, num(d.ulp_err, 3)))))
+        : h("p.muted", {}, "No differing samples recorded here."),
+    );
+  };
+  drawDetail();
 
   const CLASS_NOTE = {
     unclassified: "not explained",
@@ -414,7 +508,12 @@ async function renderCell(cellId, output, binade) {
     below_support: "below the support of the distribution",
     above_support: "above the support of the distribution",
   };
-  const rsorted = [...ranges].sort((a, b) =>
+  const tagged = [
+    ...ranges.map((x) => ({ ...x, be: r.backend })),
+    ...tRanges.map((x) => ({ ...x, be: cmp })),
+  ];
+  const rsorted = tagged.sort((a, b) =>
+    (a.be === r.backend ? 0 : 1) - (b.be === r.backend ? 0 : 1) ||
     (a.class === "unclassified" ? 0 : 1) - (b.class === "unclassified" ? 0 : 1) ||
     (b.n_patterns ?? 0) - (a.n_patterns ?? 0));
   slots.ranges.replaceChildren(
@@ -422,9 +521,12 @@ async function renderCell(cellId, output, binade) {
     h("p.note", {}, "Stretches of the input range where no finite relative error could be computed. All but ",
       h("em", {}, "not explained"), " have a known cause."),
     rsorted.length
-      ? table([{ label: "from", align: "r" }, { label: "to", align: "r" },
+      ? table([
+        ...(t ? [{ label: "backend" }] : []),
+        { label: "from", align: "r" }, { label: "to", align: "r" },
         { label: "bit patterns", align: "r" }, { label: "cause" }],
         rsorted.map((x) => h("tr", { class: x.class === "unclassified" ? "row-warn" : null },
+          t ? h("td", { class: x.be === cmp ? "cmp" : null }, backendLabel(x.be)) : null,
           h("td.r", {}, num(x.x_from)),
           h("td.r", {}, num(x.x_to)),
           h("td.r", {}, int(x.n_patterns)),
