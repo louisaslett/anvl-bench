@@ -16,7 +16,7 @@
 
 import { parquetMetadataAsync, parquetReadObjects } from "./hyparquet.js";
 
-const EAGER = ["summary", "runs"];
+const EAGER = ["summary", "runs", "categories"];
 const WHOLE = ["hist", "ranges"];
 const BY_CELL = ["detail", "bands"];
 
@@ -44,11 +44,28 @@ export async function openStore(source) {
   const readAll = async (table, columns) =>
     parquetReadObjects({ file: await source.buffer(table), columns });
 
-  const [summary, runs] = await Promise.all([
+  // The small tables in one request. They are written with a row group per
+  // cell like the large ones, and reading them through the range reader cost
+  // one round trip per row group -- over a hundred for `hist` on a single page.
+  const readWhole = async (table) => {
+    const buf = await source.buffer(table);
+    return parquetReadObjects({ file: await buf.slice(0, buf.byteLength) });
+  };
+
+  // An artifact says what it holds in its manifest; older ones predate the
+  // per-class table, and asking for a file that is not there would fetch a 404
+  // page and try to parse it as Parquet.
+  const listed = (t) =>
+    source.has(t) && (manifest.files ?? []).some((f) => f.table === t && f.rows > 0);
+
+  const [summary, runs, categories] = await Promise.all([
     readAll("summary"),
     // The fingerprint is nice to have, not load-bearing: a partial artifact
     // (just manifest + summary) should still open.
     source.has("runs") ? readAll("runs").catch(() => []) : [],
+    // Figures by input class: a few rows per result, small enough to read up
+    // front, which is what lets the overview show normal-input accuracy.
+    listed("categories") ? readAll("categories").catch(() => []) : [],
   ]);
 
   /**
@@ -86,7 +103,7 @@ export async function openStore(source) {
   async function cellRows(table, cellId, columns) {
     if (!source.has(table)) return [];
     if (WHOLE.includes(table)) {
-      if (!whole.has(table)) whole.set(table, readAll(table));
+      if (!whole.has(table)) whole.set(table, readWhole(table));
       return (await whole.get(table)).filter((r) => r.cell_id === cellId);
     }
     const range = await cellRange(table, cellId);
@@ -137,6 +154,13 @@ export async function openStore(source) {
   const bySpec = new Map(specs.map((s) => [s, subject.filter((r) => r.spec === s)]));
   const runById = new Map(runs.map((r) => [r.run_id, r]));
 
+  const byClass = new Map();
+  for (const c of categories) {
+    const k = c.cell_id + SEP + c.output;
+    if (!byClass.has(k)) byClass.set(k, {});
+    byClass.get(k)[c.input_class] = c;
+  }
+
   return {
     source,
     manifest,
@@ -149,6 +173,9 @@ export async function openStore(source) {
     twin,
     twinId,
     bySpec: (s) => bySpec.get(s) ?? [],
+    /** A result's figures by input class, or null for an older artifact. */
+    classes: (r) => byClass.get(r.cell_id + SEP + r.output) ?? null,
+    hasClasses: byClass.size > 0,
     result: (cellId, output) => byKey.get(cellId + SEP + output),
     cellRows,
     tables: { EAGER, WHOLE, BY_CELL },

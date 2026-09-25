@@ -12,7 +12,7 @@
 import { listDeployed, urlSource, fileSource } from "./source.js";
 import { openStore, isUnexplained } from "./store.js";
 import { binadeChart, histChart, BEHAVIOUR } from "./chart.js";
-import { num, int, pct, cellParts, flagList } from "./fmt.js";
+import { num, int, pct, compact, cellParts, flagList } from "./fmt.js";
 
 // --- tiny DOM helper ---------------------------------------------------
 
@@ -45,12 +45,17 @@ function h(tag, attrs = {}, ...kids) {
 const put = (node, ...kids) =>
   node.replaceChildren(...kids.flat(9).filter((k) => k !== null && k !== undefined && k !== false));
 
-const table = (headers, rows) =>
+// `groups`, when given, is a header row above the column headers: a list of
+// { label, span } naming runs of columns, so related figures read as a set.
+const table = (headers, rows, groups = null) =>
   h("div.table-wrap", { tabindex: "0", role: "region", "aria-label": "results" },
     h("table.grid", {},
-      h("thead", {}, h("tr", {}, headers.map((c) =>
-        h("th", { class: [c.align === "r" ? "r" : null, c.cls].filter(Boolean).join(" ") || null,
-        title: c.hint ?? null }, c.label ?? c)))),
+      h("thead", {},
+        groups ? h("tr.groups", {}, groups.map((g) =>
+          h("th", { colspan: g.span ?? 1, class: g.cls ?? null, title: g.hint ?? null }, g.label ?? ""))) : null,
+        h("tr", {}, headers.map((c) =>
+          h("th", { class: [c.align === "r" ? "r" : null, c.cls].filter(Boolean).join(" ") || null,
+            title: c.hint ?? null }, c.label ?? c)))),
       h("tbody", {}, rows)));
 
 /** How a backend is named on screen. */
@@ -144,18 +149,123 @@ function renderHeader() {
 
 // --- overview ----------------------------------------------------------
 
+// --- input classes -----------------------------------------------------
+//
+// Relative error only means something for ordinary finite inputs inside the
+// support. Everything else is a question of matching base R, and folding the
+// two into one "worst relative error" let an output flushed to zero stand in
+// for how accurate a function is. The export splits every result by input
+// class (see input_class() in the harness); these read that split.
+
+const CLASSES = {
+  normal: {
+    label: "normal", long: "Normal inputs",
+    expect: "small relative error",
+  },
+  subnormal: {
+    label: "zero & subnormal", long: "Zero & subnormal inputs",
+    expect: "behave as ±0: XLA flushes subnormals to zero on entry",
+  },
+  out_of_support: {
+    label: "outside the support", long: "Outside the support",
+    expect: "match base R exactly: a fixed limit (0, ±∞ or NaN)",
+  },
+  inf_nan: {
+    label: "±∞ & NaN", long: "±∞ and NaN inputs",
+    expect: "match base R exactly",
+  },
+};
+// The classes whose right answer is a fixed value, so the measure is agreement.
+const EXACT = ["out_of_support", "inf_nan"];
+
+/**
+ * An output flushed to zero: the result is ±0 where base R's value is
+ * subnormal -- a value this backend cannot hold, so zero is what it must give.
+ * It scores a relative error of exactly 1 and, unmarked, reads as the function
+ * being wholly wrong. Only a subnormal reference counts: a zero where base R's
+ * value is a normal float is a real loss (a normal result was representable),
+ * and a zero where it is large is simply wrong. Until the sweep tallies outputs
+ * by class, this can only be said of the worst sample, which the export
+ * records exactly.
+ */
+const SMALLEST_NORMAL = { f32: 2 ** -126, f64: 2 ** -1022 };
+const isUnderflow = (c, dtype) =>
+  !!c && c.worst_value === 0 && Number.isFinite(c.worst_reference) && c.worst_reference !== 0 &&
+  Math.abs(c.worst_reference) < (SMALLEST_NORMAL[dtype] ?? 0);
+
+const UNDERFLOW_HINT = "The worst case is an output flushed to 0: base R's value there is subnormal, which this backend cannot represent. " +
+  "Until the sweep splits results by output, the worst error apart from these is not known.";
+const underflowMark = () => h("span.uf", { title: UNDERFLOW_HINT }, "↓0");
+
+/** A worst relative error, marked when it is an underflow to zero. */
+const worstCell = (w, underflow) => [num(w, 3), underflow ? [" ", underflowMark()] : null];
+
+/**
+ * One result's figures by class, falling back to all inputs for an artifact
+ * that predates the split -- flagged, so nothing is labelled normal that is not.
+ */
+function figures(r) {
+  const c = app.store.classes(r);
+  if (!c) {
+    return {
+      split: false,
+      normal: {
+        n: r.n_samples, n_identical: r.n_exact, worst_rel_err: r.worst_rel_err,
+        worst_value: r.worst_value, worst_reference: r.worst_reference,
+      },
+      subnormal: null,
+      special: null,
+    };
+  }
+  const ex = EXACT.map((k) => c[k]).filter(Boolean);
+  const n = ex.reduce((a, x) => a + x.n, 0);
+  const matched = ex.reduce((a, x) => a + x.n_identical, 0);
+  return {
+    split: true,
+    normal: c.normal ?? null,
+    subnormal: c.subnormal ?? null,
+    special: n ? { n, matched, mismatches: n - matched } : null,
+  };
+}
+
+/** Figures over many results, e.g. one tile row. */
 function aggregate(rows) {
-  const samples = rows.reduce((a, r) => a + (r.n_samples ?? 0), 0);
-  const exact = rows.reduce((a, r) => a + (r.n_exact ?? 0), 0);
-  const finite = rows.map((r) => r.worst_rel_err).filter((v) => typeof v === "number" && !Number.isNaN(v));
+  let n = 0, same = 0, worst = null, worstAllUnderflow = false;
+  let spN = 0, spMatched = 0, split = true;
+  for (const r of rows) {
+    const f = figures(r);
+    split = split && f.split;
+    if (f.normal) {
+      n += f.normal.n ?? 0;
+      same += f.normal.n_identical ?? 0;
+      const w = f.normal.worst_rel_err;
+      if (typeof w === "number" && !Number.isNaN(w)) {
+        // Marked as an underflow only when every result at the worst is one.
+        if (worst === null || w > worst) { worst = w; worstAllUnderflow = isUnderflow(f.normal, r.dtype); }
+        else if (w === worst) worstAllUnderflow = worstAllUnderflow && isUnderflow(f.normal, r.dtype);
+      }
+    }
+    if (f.special) { spN += f.special.n; spMatched += f.special.matched; }
+  }
   return {
     n: rows.length,
-    samples,
-    exactFrac: samples ? exact / samples : null,
-    worst: finite.length ? Math.max(...finite) : null,
+    samples: rows.reduce((a, r) => a + (r.n_samples ?? 0), 0),
+    split,
+    normalFrac: n ? same / n : null,
+    worst,
+    worstUnderflow: worst > 0 && worstAllUnderflow,
+    special: spN ? { n: spN, matched: spMatched, mismatches: spN - spMatched } : null,
     unexplained: rows.filter(isUnexplained).length,
-    failed: rows.filter((r) => r.error !== null && r.error !== undefined).length,
   };
+}
+
+/** Agreement on the exact-match classes: a count, never a rounded 100%. */
+function specialCell(sp) {
+  if (!sp) return h("span.muted", {}, "—");
+  return sp.mismatches
+    ? h("span.pill.warn", { title: `${int(sp.mismatches)} of ${int(sp.n)} inputs outside the support or ±∞/NaN do not match base R` },
+      `${compact(sp.mismatches)} \u2260`)
+    : h("span.pill.ok", { title: `all ${int(sp.n)} inputs outside the support or ±∞/NaN match base R` }, "✓ all");
 }
 
 function renderOverview() {
@@ -175,7 +285,11 @@ function renderOverview() {
     out.push(h("p.lede", {},
       `${cmp} is swept alongside as a comparator, against the same base R reference and on the same inputs. `,
       `${nTwin} of ${all.n} anvl results have a ${cmp} equivalent; the rest are variants ${cmp} does not offer. `,
-      `Every figure on this page is anvl's own \u2014 the comparison is on each function's page and each result's page.`));
+      `Every figure on this page is anvl's own — the comparison is on each function's page and each result's page.`));
+  }
+  if (!all.split) {
+    out.push(h("div.callout", {}, h("strong", {}, "This artifact predates the split by input class."),
+      h("p", {}, "Figures below cover all inputs, so an output underflowing to zero or a NaN can stand in for accuracy. Re-export it with the current harness to separate normal inputs from the rest.")));
   }
 
   // The headline: where disagreement is left unexplained by NaN, subnormals or
@@ -194,20 +308,27 @@ function renderOverview() {
           h("span.muted", {}, "A disagreement is not by itself a defect in anvl — base R is the reference here, not the truth, and is sometimes the weaker implementation."))
       : null));
 
-  // One tile per function, split by precision.
+  // One tile per function, split by precision. The figures are for normal
+  // inputs; the other classes appear only as the agreement guard.
+  const nLabel = all.split ? "normal inputs" : "all inputs";
   const grid = h("div.tiles");
   for (const spec of s.specs) {
     const rows = s.bySpec(spec);
     const tile = h("a.tile", { href: specHref(spec) }, h("h2", {}, spec));
-    const body = h("div.tile-body");
+    const body = h("div.tile-body", {},
+      h("div.tile-row.tile-head", {},
+        h("span", {}), h("span.r", { title: `worst relative error against base R, ${nLabel}` }, "worst"),
+        h("span.r", { title: `samples bit-identical to base R, ${nLabel}` }, "identical"),
+        h("span.r", { title: "inputs outside the support or ±∞/NaN: do they match base R?" }, "special"),
+        h("span", { title: "results with unexplained disagreement" }, "unexpl.")));
     for (const dt of dtypes) {
       const a = aggregate(rows.filter((r) => r.dtype === dt));
       if (!a.n) continue;
       body.append(h("div.tile-row", {},
         h("span.dt", {}, dt),
-        h("span.metric", { title: "largest relative error against base R" },
-          num(a.worst, 3)),
-        h("span.metric.muted", { title: "samples bit-identical to base R" }, pct(a.exactFrac)),
+        h("span.metric", {}, worstCell(a.worst, a.worstUnderflow)),
+        h("span.metric.muted", {}, pct(a.normalFrac)),
+        h("span.metric", {}, all.split ? specialCell(a.special) : h("span.muted", {}, "—")),
         a.unexplained
           ? h("span.pill.warn", { title: "results with unexplained disagreement" }, `${a.unexplained}`)
           : h("span.pill.ok", { title: "all disagreement explained" }, "✓")));
@@ -217,9 +338,12 @@ function renderOverview() {
   }
   out.push(grid);
   out.push(h("p.legend", {},
-    "Each row of a tile: precision, worst relative error against base R, ",
-    "share of samples bit-identical to base R, and the number of results with ",
-    "disagreement that nothing explains."));
+    all.split
+      ? [`Worst relative error and bit-identical share are for `, h("strong", {}, "normal inputs"),
+        ` — finite, not subnormal, inside the support — where a small relative error is the right expectation. `,
+        h("strong", {}, "Special"), ` counts inputs outside the support or ±∞/NaN whose result differs from base R, where it should match exactly. `,
+        underflowMark(), ` marks a worst case that is an output flushed to zero, where base R’s value is subnormal.`]
+      : "Each row: precision, worst relative error and bit-identical share over all inputs, and results with disagreement that nothing explains."));
 
   out.push(renderRuns());
   put(main(), ...out);
@@ -257,19 +381,24 @@ function renderRuns() {
 // --- one function ------------------------------------------------------
 
 const SORTS = {
-  worst: (a, b) => (b.worst_rel_err ?? -1) - (a.worst_rel_err ?? -1),
-  ulp: (a, b) => (b.worst_ulp_err ?? -1) - (a.worst_ulp_err ?? -1),
-  exact: (a, b) => (a.n_exact / a.n_samples) - (b.n_exact / b.n_samples),
+  worst: (a, b) => (figures(b).normal?.worst_rel_err ?? -1) - (figures(a).normal?.worst_rel_err ?? -1),
+  exact: (a, b) => (frac(figures(a).normal) ?? 2) - (frac(figures(b).normal) ?? 2),
+  special: (a, b) => (figures(b).special?.mismatches ?? -1) - (figures(a).special?.mismatches ?? -1),
   name: (a, b) => a.cell_id.localeCompare(b.cell_id) || a.output.localeCompare(b.output),
 };
+const frac = (c) => (c && c.n ? c.n_identical / c.n : null);
 let specSort = "worst";
 
 function renderSpec(spec) {
   const s = app.store;
   const rows = s.bySpec(spec);
+  if (!rows.length) return setStatus(`No results for ${spec} in this artifact.`, "error");
   const cmp = s.comparators[0];
-  // The comparator's figures for the same cell, beside anvl's. No verdict
-  // column: the two numbers are shown and the reader compares them.
+  const split = s.hasClasses;
+  const a = aggregate(rows);
+
+  // The comparator's normal-input figures for the same cell, beside anvl's. No
+  // verdict column: the two numbers are shown and the reader compares them.
   const cmpCells = (r) => {
     if (!cmp) return null;
     const t = s.twin(r, cmp);
@@ -277,33 +406,48 @@ function renderSpec(spec) {
       return h("td.muted.cmp.none", { colspan: 2, title: `${backendLabel(cmp)} has no equivalent of this variant` },
         `no ${backendLabel(cmp)} equivalent`);
     }
+    const tn = figures(t).normal;
     return [
-      h("td.r.cmp", {}, num(t.worst_rel_err, 3)),
-      h("td.r.cmp", {}, pct(t.n_exact / t.n_samples)),
+      h("td.r.cmp", {}, worstCell(tn?.worst_rel_err, isUnderflow(tn, t.dtype))),
+      h("td.r", {}, pct(frac(tn))),
     ];
   };
-  if (!rows.length) return setStatus(`No results for ${spec} in this artifact.`, "error");
-  const a = aggregate(rows);
 
   const sorted = [...rows].sort(SORTS[specSort] ?? SORTS.worst);
-  const body = sorted.map((r) => h("tr", { class: isUnexplained(r) ? "row-warn" : null },
-    h("td", {}, h("a", { href: cellHref(r.cell_id, r.output) },
-      h("span.dt", {}, r.dtype), " ", r.kind, " ", h("span.muted", {}, r.param_set))),
-    h("td.flags", {}, flagList(r.flags).map((f) => h("span.chip.flag", {}, f))),
-    h("td", {}, h("code", {}, r.output)),
-    h("td.r", {}, num(r.worst_rel_err, 3)),
-    h("td.r", {}, num(r.worst_ulp_err, 3)),
-    h("td.r", {}, pct(r.n_exact / r.n_samples)),
-    h("td", {}, isUnexplained(r)
-      ? h("a.pill.warn", { href: cellHref(r.cell_id, r.output) },
-        `${num(Math.abs(r.unexplained_from), 2)} … ${num(Math.abs(r.unexplained_to), 2)}`)
-      : h("span.pill.ok", {}, "✓")),
-    cmpCells(r)));
+  const body = sorted.map((r) => {
+    const f = figures(r);
+    return h("tr", { class: isUnexplained(r) ? "row-warn" : null },
+      h("td", {}, h("a", { href: cellHref(r.cell_id, r.output) },
+        h("span.dt", {}, r.dtype), " ", r.kind, " ", h("span.muted", {}, r.param_set))),
+      h("td.flags", {}, flagList(r.flags).map((fl) => h("span.chip.flag", {}, fl))),
+      h("td", {}, h("code", {}, r.output)),
+      h("td.r.grp", {}, worstCell(f.normal?.worst_rel_err, isUnderflow(f.normal, r.dtype))),
+      h("td.r", {}, pct(frac(f.normal))),
+      split ? h("td.r.grp", {}, pct(frac(f.subnormal))) : null,
+      split ? h("td.grp", {}, specialCell(f.special)) : null,
+      h("td.grp", {}, isUnexplained(r)
+        ? h("a.pill.warn", { href: cellHref(r.cell_id, r.output) },
+          `${num(Math.abs(r.unexplained_from), 2)} … ${num(Math.abs(r.unexplained_to), 2)}`)
+        : h("span.pill.ok", {}, "✓")),
+      cmpCells(r));
+  });
 
   const sortSel = h("select", { onchange: (e) => { specSort = e.target.value; renderSpec(spec); } },
-    [["worst", "worst relative error"], ["ulp", "worst ulp error"],
-     ["exact", "least bit-identical"], ["name", "name"]].map(([v, l]) =>
+    [["worst", "worst relative error (normal inputs)"], ["exact", "least bit-identical (normal inputs)"],
+     ...(split ? [["special", "most special-value mismatches"]] : []), ["name", "name"]].map(([v, l]) =>
       h("option", { value: v, selected: v === specSort }, l)));
+
+  const nLabel = split ? "Normal inputs" : "All inputs";
+  const groups = [
+    { label: "", span: 3 },
+    { label: nLabel, span: 2, cls: "grp", hint: split ? "finite, not subnormal, inside the support: a small relative error is the expectation" : "this artifact predates the split by input class" },
+    ...(split ? [
+      { label: "Zero & subnormal", span: 1, cls: "grp", hint: CLASSES.subnormal.expect },
+      { label: "Special", span: 1, cls: "grp", hint: "outside the support, or ±∞/NaN: should match base R exactly" },
+    ] : []),
+    { label: "", span: 1, cls: "grp" },
+    ...(cmp ? [{ label: `${backendLabel(cmp)}, ${nLabel.toLowerCase()}`, span: 2, cls: "cmp" }] : []),
+  ];
 
   put(main(),
     h("nav.crumbs", {}, h("a", { href: "#/" }, "overview"), " / ", h("span", {}, spec)),
@@ -317,15 +461,20 @@ function renderSpec(spec) {
       { label: "cell", hint: "precision, value or gradient, parameter set" },
       "flags",
       { label: "output", hint: "value, or the argument differentiated" },
-      { label: "worst rel err", align: "r" }, { label: "worst ulp", align: "r" },
+      { label: "worst rel err", align: "r", cls: "grp" },
       { label: "bit-identical", align: "r" },
-      { label: "unexplained", hint: "range of x where disagreement is not explained by NaN, subnormals or the edge of the support" },
+      ...(split ? [
+        { label: "bit-identical", align: "r", cls: "grp" },
+        { label: "matched", cls: "grp" },
+      ] : []),
+      { label: "unexplained", cls: "grp", hint: "range of x where disagreement is not explained by NaN, subnormals or the edge of the support" },
       // anvl's own columns first; the comparator's follow as an appendix.
       ...(cmp ? [
-        { label: `${backendLabel(cmp)} worst rel err`, align: "r", cls: "cmp", hint: `${backendLabel(cmp)}, on the same inputs, against the same base R reference` },
-        { label: `${backendLabel(cmp)} bit-identical`, align: "r" },
+        { label: "worst rel err", align: "r", cls: "cmp", hint: `${backendLabel(cmp)}, on the same inputs, against the same base R reference` },
+        { label: "bit-identical", align: "r" },
       ] : []),
-    ], body));
+    ], body, groups),
+    split ? h("p.legend", {}, underflowMark(), " marks a worst case that is an output flushed to zero, where base R’s value is subnormal.") : null);
 }
 
 // --- one result --------------------------------------------------------
@@ -361,12 +510,43 @@ async function renderCell(cellId, output, zoom) {
     ["base R there", (x) => num(x.worst_reference)],
     ["samples", (x) => int(x.n_samples)],
   ];
-  const stats = t
+  const overall = t
     ? h("div.compare", {}, table(
       [{ label: "" }, { label: me, align: "r" }, { label: cmpLabel, align: "r" }],
       STATS.map(([k, f]) => h("tr", {},
         h("th", { scope: "row" }, k), h("td.r", {}, f(r)), h("td.r.cmp", {}, f(t))))))
     : h("dl.stats", {}, STATS.map(([k, f]) => h("div.stat", {}, h("dt", {}, k), h("dd", {}, f(r)))));
+
+  // By input class: what each should do, and what it did. The all-inputs
+  // figures, ulp and the values at the worst case, stay one click away.
+  const mine = s.classes(r);
+  const theirs = t ? s.classes(t) : null;
+  const classRow = (key, c, tc) => h("tr", { class: key === "all" ? "all-row" : null },
+    h("th", { scope: "row" }, key === "all" ? "All inputs" : CLASSES[key].long),
+    h("td.expect", {}, key === "all" ? "" : CLASSES[key].expect),
+    h("td.r", {}, int(c?.n)),
+    h("td.r", {}, pct(frac(c))),
+    h("td.r", {}, c ? worstCell(c.worst_rel_err, isUnderflow(c, r.dtype)) : "—"),
+    h("td.r", {}, c && c.worst_rel_err > 0 ? h("span", { title: c.worst_bits ?? "" }, num(c.worst_x)) : "—"),
+    t ? h("td.r.cmp", {}, pct(frac(tc))) : null,
+    t ? h("td.r", {}, tc ? worstCell(tc.worst_rel_err, isUnderflow(tc, r.dtype)) : "—") : null);
+  const asClass = (x) => x && ({
+    n: x.n_samples, n_identical: x.n_exact, worst_rel_err: x.worst_rel_err,
+    worst_x: x.worst_x, worst_bits: x.worst_bits, worst_value: x.worst_value, worst_reference: x.worst_reference,
+  });
+  const stats = mine
+    ? [
+      h("div.compare.classes", {}, table([
+        { label: "input" }, { label: "expected" }, { label: "samples", align: "r" },
+        { label: "bit-identical", align: "r" }, { label: "worst rel err", align: "r" }, { label: "worst at x", align: "r" },
+        ...(t ? [{ label: "bit-identical", align: "r", cls: "cmp" }, { label: "worst rel err", align: "r" }] : []),
+      ], [
+        ...Object.keys(CLASSES).filter((k) => mine[k]).map((k) => classRow(k, mine[k], theirs?.[k])),
+        classRow("all", asClass(r), asClass(t)),
+      ], t ? [{ label: "", span: 6 }, { label: cmpLabel, span: 2, cls: "cmp" }] : null)),
+      h("details.fold", {}, h("summary", {}, "Worst case over all inputs: ulp error and the values there"), overall),
+    ]
+    : overall;
 
   const between = (x) => [h("code", {}, num(x.unexplained_from)), " and ", h("code", {}, num(x.unexplained_to))];
   const twinSays = t
@@ -471,6 +651,7 @@ async function renderCell(cellId, output, zoom) {
 
     // --- the chart ---
     const chart = binadeChart({
+      support: Number.isFinite(r.support_lo) || Number.isFinite(r.support_hi) ? [r.support_lo, r.support_hi] : null,
       bands,
       view: v,
       compare: t ? { label: cmpLabel, bands: tBands } : null,
@@ -509,7 +690,12 @@ async function renderCell(cellId, output, zoom) {
       rangeLine,
       h("div.chart-foot", {},
         h("div.key", {}, Object.values(BEHAVIOUR).map((b) =>
-          h("span.key-item", {}, h("i", { class: b.cls }), b.label)), cmpKey),
+          h("span.key-item", {}, h("i", { class: b.cls }), b.label)), cmpKey,
+          h("span.key-sep"),
+          h("span.key-item", { title: CLASSES.subnormal.expect }, h("i.k-bg-sub"), "zero & subnormal inputs"),
+          Number.isFinite(r.support_lo) || Number.isFinite(r.support_hi)
+            ? h("span.key-item", { title: CLASSES.out_of_support.expect }, h("i.k-bg-oos"), "outside the support")
+            : null),
         h("span.muted", {}, v ? `${v[1] - v[0]} of ${columns.length} binades` : `${columns.length} binades`)),
     );
 
@@ -552,7 +738,7 @@ async function renderCell(cellId, output, zoom) {
           ], shown.map((d) => h("tr", {},
             h("td", {}, h("code.bits", {}, d.bits ?? "")),
             h("td.r", {}, num(d.x)),
-            h("td.r", {}, num(d.value)),
+            h("td.r", {}, num(d.value), isUnderflow({ worst_value: d.value, worst_reference: d.reference }, parts.dtype) ? [" ", underflowMark()] : null),
             h("td.r", {}, num(d.reference)),
             h("td.r", {}, num(d.rel_err, 3)),
             h("td.r", {}, num(d.ulp_err, 3)))))

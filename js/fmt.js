@@ -25,6 +25,16 @@ export function int(v) {
   return Math.round(v).toLocaleString("en-US").replace(/,/g, " ");
 }
 
+/** A count short enough for a tile: 24.6k, 7.8M. Exact figures go in a tooltip. */
+export function compact(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "\u2014";
+  const a = Math.abs(v);
+  if (a < 1e3) return String(Math.round(v));
+  if (a < 1e6) return (v / 1e3).toFixed(a < 1e4 ? 1 : 0) + "k";
+  if (a < 1e9) return (v / 1e6).toFixed(a < 1e7 ? 1 : 0) + "M";
+  return (v / 1e9).toFixed(a < 1e10 ? 1 : 0) + "G";
+}
+
 export function pct(v, dp = 1) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   if (v > 0 && v < 10 ** -dp / 100) return "<" + (10 ** -dp / 100 * 100).toFixed(dp) + "%";

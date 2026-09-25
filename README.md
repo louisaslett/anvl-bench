@@ -13,6 +13,33 @@ presents their results.
 > reference these sweeps compare against, not an oracle, and in places it is the
 > weaker implementation. The site is worded accordingly.
 
+## Input classes
+
+Relative error is the right measure only for ordinary inputs. Every result is
+therefore split by the class of its **input**, using `categories.parquet`
+(written by the harness's `export`):
+
+| class | inputs | what should happen |
+| --- | --- | --- |
+| normal | finite, not subnormal, inside the support | a small relative error |
+| zero & subnormal | exponent field 0 | behave as ±0 — XLA flushes subnormals on entry |
+| outside the support | finite, wholly off the support (quantiles only) | match base R exactly |
+| ±∞ & NaN | the top exponent field | match base R exactly |
+
+The overview and each function's page show accuracy for **normal inputs**, plus
+a *special* column counting inputs outside the support or ±∞/NaN whose result
+differs from base R. A result page shows every class, and shades the zero &
+subnormal and out-of-support parts of the binade chart.
+
+`↓0` marks a worst case where the result is ±0 and base R's value is subnormal —
+an output this backend cannot represent. A zero where base R's value is a
+*normal* float is not marked: a representable result was lost there.
+
+This split is by input only, so an output that underflows from a normal input
+still counts as normal. A later version of the sweep will also classify outputs.
+An artifact exported before `categories.parquet` existed still opens, showing
+all-input figures with a note saying so.
+
 ## Comparing with JAX
 
 When an artifact also holds JAX results (the harness's `--backends anvl,jax`),

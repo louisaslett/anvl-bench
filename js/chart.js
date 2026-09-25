@@ -110,7 +110,7 @@ function compareOf(columns, from, to, byKey) {
  * just a different colour -- on the same axis, since both are the same
  * quantity: relative error against the same base R reference.
  */
-export function binadeChart({ bands, view, onZoom, compare = null }) {
+export function binadeChart({ bands, view, onZoom, compare = null, support = null }) {
   const { columns, zeroAt, special } = orderBands(bands);
   const wrap = document.createElement("div");
   wrap.className = "chart";
@@ -177,6 +177,36 @@ export function binadeChart({ bands, view, onZoom, compare = null }) {
       ? "worst relative error against base R"
       : "no finite error anywhere in this result")));
 
+  // Input classes, as backgrounds behind the bars: where a large relative error
+  // is expected rather than alarming. Binade 0 holds zero and the subnormals;
+  // a band wholly outside the support has a fixed right answer. Shading runs of
+  // columns (not buckets) keeps the extent exact at any zoom.
+  const classOf = (c) =>
+    c.binade === 0 ? "sub"
+      : support && (c.x_to < support[0] || c.x_from > support[1]) ? "oos" : null;
+  svg.append(el("defs", {}, el("pattern", {
+    id: "hatch-oos", width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)",
+  }, el("line", { class: "hatch", x1: 0, y1: 0, x2: 0, y2: 6 }))));
+  let runStart = i0;
+  for (let i = i0; i <= i1; i++) {
+    const cls = i < i1 ? classOf(columns[i]) : undefined;
+    const prev = runStart < i1 ? classOf(columns[runStart]) : null;
+    if (i === i1 || cls !== prev) {
+      if (prev) {
+        const x0 = PAD.l + ((runStart - i0) / n) * PLOT_W;
+        const w = Math.max(((i - runStart) / n) * PLOT_W, 2);
+        svg.append(el("rect", { class: `bg bg-${prev}`, x: x0.toFixed(2), width: w.toFixed(2), y: PAD.t, height: PLOT_H }));
+      }
+      runStart = i;
+    }
+  }
+  const CLASS_NAME = { sub: "zero & subnormal", oos: "outside the support" };
+  const inputsOf = (b) => {
+    const seen = new Set();
+    for (let i = b.from; i < b.to; i++) seen.add(CLASS_NAME[classOf(columns[i])] ?? "normal");
+    return [...seen].join(" + ");
+  };
+
   // bars
   const bw = PLOT_W / nBuckets;
   const g = el("g", { class: "bars" });
@@ -193,7 +223,8 @@ export function binadeChart({ bands, view, onZoom, compare = null }) {
       height: Math.max(base - top, 1.5).toFixed(2),
     });
     const wb = b.worstBand;
-    const spanTxt = b.to - b.from > 1 ? `${b.to - b.from} binades` : `binade ${wb.binade}`;
+    const spanTxt = (b.to - b.from > 1 ? `${b.to - b.from} binades` : `binade ${wb.binade}`) +
+      ` \u2014 inputs: ${inputsOf(b)}`;
     const tip =
       `${spanTxt}\n${wb.sign < 0 ? MINUS : "+"} ${num(Math.abs(wb.x_from))} \u2026 ${num(Math.abs(wb.x_to))}\n` +
       `anvl worst rel err ${b.err === null ? "none" : num(10 ** b.err, 3)}` +

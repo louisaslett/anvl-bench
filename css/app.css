@@ -337,3 +337,40 @@ button.reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
   font-size: 0.85rem; margin: 0.2rem 0 0.6rem; padding: 0.45rem 0.7rem;
   border-left: 3px solid var(--accent); background: var(--bg);
 }
+
+/* --- input classes ------------------------------------------------------ */
+
+/* Chart backgrounds: a tint for zero & subnormal inputs, a 45-degree hatch for
+   inputs outside the support. Texture rather than hue, so neither can be
+   mistaken for one of the behaviour colours on the bars in front. */
+.binade-svg .bg { pointer-events: none; }
+.binade-svg .bg-sub { fill: var(--ink-soft); fill-opacity: 0.12; }
+.binade-svg .bg-oos { fill: url(#hatch-oos); }
+.binade-svg .hatch { stroke: var(--ink-soft); stroke-opacity: 0.35; stroke-width: 1.5; }
+i.k-bg-sub { background: var(--ink-soft); opacity: 0.25; }
+i.k-bg-oos {
+  background: repeating-linear-gradient(45deg, var(--ink-soft) 0 1px, transparent 1px 4px);
+  opacity: 0.6; border: 1px solid var(--line);
+}
+.key-sep { width: 1px; align-self: stretch; background: var(--line); }
+
+/* An output that underflowed to zero: marked, never hidden. */
+.uf {
+  display: inline-block; font-size: 0.72em; font-family: var(--mono); line-height: 1.2;
+  padding: 0 0.25em; border: 1px solid var(--line); border-radius: 3px;
+  color: var(--ink-soft); cursor: help; vertical-align: 0.1em;
+}
+
+/* Overview tiles gain a header and a column. */
+.tiles { grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); }
+.tile-row { grid-template-columns: 2.4rem 1fr 3.4rem 4rem 3rem; }
+.tile-row > span:last-child { justify-self: end; }
+.tile-row .r, .tile-row .metric { text-align: right; }
+.tile-head { font-family: inherit; font-size: 0.68rem; color: var(--ink-soft); padding-bottom: 0.1rem; }
+
+/* Grouped table headers: a rule starts each group. */
+table.grid tr.groups th { font-size: 0.72rem; font-weight: 600; border-bottom: 0; padding-bottom: 0; }
+table.grid th.grp, table.grid td.grp { border-left: 1px solid var(--line); }
+.classes td.expect { color: var(--ink-soft); font-size: 0.8rem; max-width: 20rem; }
+.classes tr.all-row th, .classes tr.all-row td { border-top: 2px solid var(--line); }
+.classes { max-width: none; }
