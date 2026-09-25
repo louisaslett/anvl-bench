@@ -414,8 +414,10 @@ async function renderCell(cellId, output, zoom) {
     detail: h("section.panel", {}, h("h2", {}, "Worst inputs"), h("p.status", {}, "reading…")),
     ranges: h("section.panel", {}, h("h2", {}, "Regions with no finite error"), h("p.status", {}, "reading…")),
   };
+  // The histogram is recorded per result, so no zoom can reach it. Placing it
+  // above the chart leaves the zoom governing everything that follows.
   put(main(),
-    ...head.filter(Boolean), slots.bands, slots.hist, slots.detail, slots.ranges);
+    ...head.filter(Boolean), slots.hist, slots.bands, slots.detail, slots.ranges);
 
   const forOutput = (rows) => rows.filter((x) => x.output === output);
   const rowsOf = (tbl, id) => (id ? s.cellRows(tbl, id).then(forOutput) : Promise.resolve([]));
@@ -514,8 +516,8 @@ async function renderCell(cellId, output, zoom) {
     // --- the histogram: whole result only, and says so when zoomed ---
     put(slots.hist,
       h("h2", {}, "Distribution of relative error"),
-      v ? h("p.note", {}, h("strong", {}, "Whole result, not the zoomed range."),
-        " The sweep records this distribution per result rather than per binade, so it cannot follow the zoom; the line under the chart above gives the range's own figures.") : null,
+      v ? h("p.note", {}, h("strong", {}, "Whole result — the zoom below does not apply here."),
+        " The sweep records this distribution per result rather than per binade; the line under the chart gives the zoomed range's own figures.") : null,
       histChart(hist, t ? { label: cmpLabel, rows: tHist } : null),
       t ? h("div.chart-foot", {}, h("div.key", {},
         h("span.key-item", {}, h("i.k-anvl"), `${me} (bars)`), cmpKey)) : null,
