@@ -100,16 +100,17 @@ function compareOf(columns, from, to, byKey) {
 }
 
 /**
- * The binade chart. `view` is the index range currently shown; clicking a bar
- * that covers more than one binade zooms into it, and clicking a single
- * binade selects it. Callers re-render on any state change.
+ * The binade chart. `view` is the index range currently shown. Dragging across
+ * the plot selects a range and calls `onZoom([from, to))` with column indices;
+ * the caller owns the view (it lives in the URL) and re-renders. Hovering a bar
+ * still gives that binade's figures.
  *
  * `compare`, when given, is another backend's bands for the same cell (today,
  * JAX). It is drawn as an ink line over anvl's bars -- a different mark, not
  * just a different colour -- on the same axis, since both are the same
  * quantity: relative error against the same base R reference.
  */
-export function binadeChart({ bands, view, selected, onSelect, onView, compare = null }) {
+export function binadeChart({ bands, view, onZoom, compare = null }) {
   const { columns, zeroAt, special } = orderBands(bands);
   const wrap = document.createElement("div");
   wrap.className = "chart";
@@ -182,21 +183,17 @@ export function binadeChart({ bands, view, selected, onSelect, onView, compare =
   const hits = el("g", { class: "hits" });
   buckets.forEach((b, j) => {
     const x = PAD.l + j * bw;
-    const isSel = selected !== null && selected !== undefined &&
-      selected >= b.from && selected < b.to;
     const base = PAD.t + PLOT_H;
     const top = b.err === null ? base - 1.5 : y(b.err);
     const rect = el("rect", {
-      class: `bar ${behaviourClass(b.behaviour)}${isSel ? " sel" : ""}`,
+      class: `bar ${behaviourClass(b.behaviour)}`,
       x: x.toFixed(2),
       width: Math.max(bw - 0.15, 0.4).toFixed(2),
       y: top.toFixed(2),
       height: Math.max(base - top, 1.5).toFixed(2),
     });
     const wb = b.worstBand;
-    const spanTxt = b.to - b.from > 1
-      ? `${b.to - b.from} binades \u2014 click to zoom in`
-      : `binade ${wb.binade} \u2014 click to inspect`;
+    const spanTxt = b.to - b.from > 1 ? `${b.to - b.from} binades` : `binade ${wb.binade}`;
     const tip =
       `${spanTxt}\n${wb.sign < 0 ? MINUS : "+"} ${num(Math.abs(wb.x_from))} \u2026 ${num(Math.abs(wb.x_to))}\n` +
       `anvl worst rel err ${b.err === null ? "none" : num(10 ** b.err, 3)}` +
@@ -207,8 +204,8 @@ export function binadeChart({ bands, view, selected, onSelect, onView, compare =
     rect.append(el("title", {}, document.createTextNode(tip)));
     g.append(rect);
 
-    // A bar is under two pixels wide at full range, so clicking the bar itself
-    // is a test of aim. The hit target is the full-height column behind it.
+    // A bar is under two pixels wide at full range, so hovering the bar itself
+    // is a test of aim. The hover target is the full-height column behind it.
     const hit = el("rect", {
       class: "hit",
       x: x.toFixed(2),
@@ -217,10 +214,6 @@ export function binadeChart({ bands, view, selected, onSelect, onView, compare =
       height: PLOT_H,
     });
     hit.append(el("title", {}, document.createTextNode(tip)));
-    hit.addEventListener("click", () => {
-      if (b.to - b.from > 1) onView([b.from, b.to]);
-      else onSelect(b.from);
-    });
     hits.append(hit);
   });
   svg.append(g);
@@ -255,8 +248,50 @@ export function binadeChart({ bands, view, selected, onSelect, onView, compare =
       }, document.createTextNode(compare.label)));
     }
   }
-  // Hit targets last, so the line never intercepts a click.
+  // Hover targets last, so the line never intercepts the pointer.
   svg.append(hits);
+
+  // Drag to zoom. The brush is in viewBox units; converting from the pointer
+  // needs only the rendered width, because the svg keeps its aspect ratio.
+  const brush = el("rect", { class: "brush", y: PAD.t, height: PLOT_H, x: 0, width: 0, visibility: "hidden" });
+  svg.append(brush);
+  const toX = (e) => {
+    const r = svg.getBoundingClientRect();
+    return Math.min(Math.max(((e.clientX - r.left) * W) / r.width, PAD.l), PAD.l + PLOT_W);
+  };
+  const bucketAt = (x) => Math.min(nBuckets - 1, Math.max(0, Math.floor((x - PAD.l) / bw)));
+  let start = null;
+  svg.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    start = toX(e);
+    svg.setPointerCapture(e.pointerId);
+    brush.setAttribute("x", start.toFixed(2));
+    brush.setAttribute("width", "0");
+    brush.setAttribute("visibility", "visible");
+    e.preventDefault();
+  });
+  svg.addEventListener("pointermove", (e) => {
+    if (start === null) return;
+    const x = toX(e);
+    brush.setAttribute("x", Math.min(start, x).toFixed(2));
+    brush.setAttribute("width", Math.abs(x - start).toFixed(2));
+  });
+  const finish = (e, commit) => {
+    if (start === null) return;
+    const x = toX(e);
+    const [a, b] = [Math.min(start, x), Math.max(start, x)];
+    start = null;
+    brush.setAttribute("visibility", "hidden");
+    // A press without a real drag is not a zoom; neither is a range that
+    // already is the whole view.
+    if (!commit || b - a < 4) return;
+    const from = buckets[bucketAt(a)].from;
+    const to = buckets[bucketAt(b)].to;
+    if (from === i0 && to === i1) return;
+    onZoom([from, to]);
+  };
+  svg.addEventListener("pointerup", (e) => finish(e, true));
+  svg.addEventListener("pointercancel", (e) => finish(e, false));
 
   // the sign change, when it is inside the view
   if (zeroAt > i0 && zeroAt < i1) {
@@ -270,17 +305,13 @@ export function binadeChart({ bands, view, selected, onSelect, onView, compare =
     );
   }
 
-  // x axis: label the magnitude at each end of the visible range
-  const edge = (i) => {
-    const b = columns[i];
-    const v = Math.abs(b.sign < 0 ? b.x_from : b.x_to);
-    return (b.sign < 0 ? MINUS : "") + num(v, 2);
-  };
+  // x axis: the lower bound of the leftmost binade and the upper bound of the
+  // rightmost. x_from < x_to on either sign, so this holds zoomed or not.
   svg.append(
     el("line", { class: "axis", x1: PAD.l, x2: W - PAD.r, y1: PAD.t + PLOT_H, y2: PAD.t + PLOT_H }),
-    el("text", { class: "tick", x: PAD.l, y: H - 8 }, document.createTextNode(edge(i0))),
+    el("text", { class: "tick", x: PAD.l, y: H - 8 }, document.createTextNode(num(columns[i0].x_from, 2))),
     el("text", { class: "tick", x: W - PAD.r, y: H - 8, "text-anchor": "end" },
-      document.createTextNode(edge(i1 - 1))),
+      document.createTextNode(num(columns[i1 - 1].x_to, 2))),
   );
 
   wrap.append(svg);
@@ -294,11 +325,10 @@ export function binadeChart({ bands, view, selected, onSelect, onView, compare =
       textContent: "top exponent field (±∞ and every NaN, not an interval):",
     }));
     for (const b of special) {
-      const chip = document.createElement("button");
+      const chip = document.createElement("span");
       chip.className = `chip ${behaviourClass(b.behaviour)}`;
       chip.textContent = `sign ${b.sign < 0 ? MINUS : "+"}: ${b.behaviour}` +
         (b.n_nonfinite ? `, ${b.n_nonfinite} non-finite` : "");
-      chip.addEventListener("click", () => onSelect({ special: b }));
       s.append(chip);
     }
     wrap.append(s);

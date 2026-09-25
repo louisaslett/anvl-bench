@@ -5,7 +5,7 @@
 //
 //   #/                                             overview
 //   #/spec/nv_qnorm                                one function
-//   #/cell/<cell_id>/<output>[?b=<index>]          one result, one binade
+//   #/cell/<cell_id>/<output>[?z=<from>-<to>]      one result, zoomed to a range
 //
 // Only the leaf route fetches anything beyond the index.
 
@@ -36,6 +36,15 @@ function h(tag, attrs = {}, ...kids) {
 
 // Wrapped, so a wide table scrolls within itself rather than dragging the
 // whole page sideways on a narrow screen.
+/**
+ * Replace a node's children, skipping empty entries. The DOM's own
+ * replaceChildren() stringifies null, which once printed a literal "null" on
+ * every page where an optional panel part (the JAX key, the zoom note) was
+ * absent.
+ */
+const put = (node, ...kids) =>
+  node.replaceChildren(...kids.flat(9).filter((k) => k !== null && k !== undefined && k !== false));
+
 const table = (headers, rows) =>
   h("div.table-wrap", { tabindex: "0", role: "region", "aria-label": "results" },
     h("table.grid", {},
@@ -60,12 +69,13 @@ function parseRoute() {
   const q = new URLSearchParams(qs ?? "");
   if (parts[0] === "spec" && parts[1]) return { view: "spec", spec: parts[1] };
   if (parts[0] === "cell" && parts[1] && parts[2]) {
-    return {
-      view: "cell",
-      cellId: parts[1],
-      output: parts[2],
-      binade: q.has("b") ? Number(q.get("b")) : null,
-    };
+    // The zoom is a half-open range of binade columns along the chart's axis.
+    // `b=<n>` is the single-binade link of an earlier version; it still opens.
+    let zoom = null;
+    const z = /^(\d+)-(\d+)$/.exec(q.get("z") ?? "");
+    if (z && Number(z[2]) > Number(z[1])) zoom = [Number(z[1]), Number(z[2])];
+    else if (/^\d+$/.test(q.get("b") ?? "")) zoom = [Number(q.get("b")), Number(q.get("b")) + 1];
+    return { view: "cell", cellId: parts[1], output: parts[2], zoom };
   }
   return { view: "overview" };
 }
@@ -75,14 +85,15 @@ function parseRoute() {
 const app = {
   store: null,
   deployed: [],
-  chartView: null, // zoom range, reset whenever the result changes
   chartCell: null,
   detailBackend: null, // whose worst inputs are listed; reset with the result
+  redrawCell: null, // redraws the open result page for a new zoom, in place
+  gen: 0, // bumped per result render, so a slow one cannot claim the page
 };
 
 const main = () => document.getElementById("main");
 const setStatus = (msg, cls = "") => {
-  main().replaceChildren(h(`p.status.${cls}`.replace(/\.$/, ""), {}, msg));
+  put(main(), h(`p.status.${cls}`.replace(/\.$/, ""), {}, msg));
 };
 
 // --- header ------------------------------------------------------------
@@ -128,7 +139,7 @@ function renderHeader() {
       h("span.tag", {}, `${m.depths?.join(", ") ?? "?"} depth`),
       h("span.muted", {}, `· ${app.store.source.origin}`)));
   }
-  bar.replaceChildren(...kids);
+  put(bar, ...kids);
 }
 
 // --- overview ----------------------------------------------------------
@@ -211,7 +222,7 @@ function renderOverview() {
     "disagreement that nothing explains."));
 
   out.push(renderRuns());
-  main().replaceChildren(...out);
+  put(main(), ...out);
 }
 
 function renderRuns() {
@@ -294,7 +305,7 @@ function renderSpec(spec) {
      ["exact", "least bit-identical"], ["name", "name"]].map(([v, l]) =>
       h("option", { value: v, selected: v === specSort }, l)));
 
-  main().replaceChildren(
+  put(main(),
     h("nav.crumbs", {}, h("a", { href: "#/" }, "overview"), " / ", h("span", {}, spec)),
     h("h1", {}, spec),
     h("p.lede", {}, `${a.n} results, ${int(a.samples)} samples in all. `,
@@ -319,7 +330,9 @@ function renderSpec(spec) {
 
 // --- one result --------------------------------------------------------
 
-async function renderCell(cellId, output, binade) {
+async function renderCell(cellId, output, zoom) {
+  app.redrawCell = null;
+  const gen = ++app.gen;
   const s = app.store;
   const r = s.result(cellId, output);
   if (!r) return setStatus(`No result for ${cellId} / ${output} in this artifact.`, "error");
@@ -332,11 +345,10 @@ async function renderCell(cellId, output, binade) {
   const cmpLabel = cmp ? backendLabel(cmp) : null;
   const me = backendLabel(r.backend);
 
-  // Zooming and the worst-inputs tab are per result; a new one starts fresh.
+  // The worst-inputs tab is per result; a new one starts on anvl.
   const key = `${cellId}/${output}`;
   if (app.chartCell !== key) {
     app.chartCell = key;
-    app.chartView = null;
     app.detailBackend = null;
   }
 
@@ -402,7 +414,7 @@ async function renderCell(cellId, output, binade) {
     detail: h("section.panel", {}, h("h2", {}, "Worst inputs"), h("p.status", {}, "reading…")),
     ranges: h("section.panel", {}, h("h2", {}, "Regions with no finite error"), h("p.status", {}, "reading…")),
   };
-  main().replaceChildren(
+  put(main(),
     ...head.filter(Boolean), slots.bands, slots.hist, slots.detail, slots.ranges);
 
   const forOutput = (rows) => rows.filter((x) => x.output === output);
@@ -412,128 +424,181 @@ async function renderCell(cellId, output, binade) {
     rowsOf("bands", cellId), rowsOf("hist", cellId), rowsOf("detail", cellId), rowsOf("ranges", cellId),
     rowsOf("bands", tId), rowsOf("hist", tId), rowsOf("detail", tId), rowsOf("ranges", tId),
   ]);
+  // The reader may have moved on while this was loading.
+  if (gen !== app.gen) return;
 
   const cmpKey = t ? h("span.key-item", {}, h("i.k-cmp"), `${cmpLabel} (line)`) : null;
 
-  const drawBands = () => {
+  // Columns in the chart's order: along the real line, most negative first.
+  // A zoom is a range of these, and everything below follows it by matching
+  // (sign, binade) -- the same interval for any backend at one precision.
+  const columns = bands.filter((b) => !b.special)
+    .sort((a, b) => (a.sign < 0 ? -1 : 1) - (b.sign < 0 ? -1 : 1) ||
+      (a.sign < 0 ? b.binade - a.binade : a.binade - b.binade));
+  const bkey = (x) => `${x.sign}:${x.binade}`;
+  const zoomHref = (v) => cellHref(cellId, output, v ? `?z=${v[0]}-${v[1]}` : "");
+
+  // A no-finite-error region is stored as a run of bit patterns. Its binades,
+  // read straight off the exponent field, say exactly which columns it covers.
+  const layout = parts.dtype === "f64" ? { sign: 63n, exp: 52n, mask: 0x7ffn } : { sign: 31n, exp: 23n, mask: 0xffn };
+  const fieldsOf = (hex) => {
+    const v = BigInt(hex);
+    return { sign: (v >> layout.sign) & 1n ? -1 : 1, binade: Number((v >> layout.exp) & layout.mask) };
+  };
+  const rangeKeys = (x) => {
+    const a = fieldsOf(x.bits_from);
+    const b = fieldsOf(x.bits_to);
+    const keys = [];
+    const top = Number(layout.mask);
+    // Bit order runs +0 .. +NaN, then -0 .. -NaN, so a run can cross the sign.
+    const run = (sign, lo, hi) => { for (let i = lo; i <= hi; i++) keys.push(`${sign}:${i}`); };
+    if (a.sign === b.sign) run(a.sign, Math.min(a.binade, b.binade), Math.max(a.binade, b.binade));
+    else { run(a.sign, a.binade, top); run(b.sign, 0, b.binade); }
+    return keys;
+  };
+
+  const draw = (view) => {
+    const v = view && view[0] < columns.length ? [view[0], Math.min(view[1], columns.length)] : null;
+    const inView = v ? new Set(columns.slice(v[0], v[1]).map(bkey)) : null;
+    const within = (x) => !inView || inView.has(bkey(x));
+    const lo = v ? columns[v[0]] : null;
+    const hi = v ? columns[v[1] - 1] : null;
+    // A function, not a value: a DOM node lives in one place, so each use of the
+    // range's bounds needs its own copy or the earlier ones are emptied.
+    const span = () => (v ? [h("code", {}, num(lo.x_from)), " … ", h("code", {}, num(hi.x_to))] : null);
+
+    // --- the chart ---
     const chart = binadeChart({
       bands,
-      view: app.chartView,
-      selected: binade,
+      view: v,
       compare: t ? { label: cmpLabel, bands: tBands } : null,
-      onSelect: (i) => {
-        if (i && i.special) return; // the top field has no index on the axis
-        const idx = typeof i === "number" ? i : null;
-        location.hash = cellHref(cellId, output, idx === null ? "" : `?b=${idx}`);
-      },
-      onView: (v) => { app.chartView = v; drawBands(); },
+      onZoom: (z) => { location.hash = zoomHref(z); },
     });
-    const zoomed = app.chartView !== null;
-    slots.bands.replaceChildren(
-      h("h2", {}, "Worst relative error by binade"),
-      h("p.note", {}, "The axis is the real line in bit-pattern order. Each bar is one binade, or, where they do not fit, the worst of several — click to zoom in, then click a single binade to inspect it.",
+
+    // What the zoomed range holds, summed exactly from the per-binade counts.
+    const tally = (rows) => {
+      let n = 0, same = 0, worst = null;
+      for (const b of rows) {
+        if (b.special || !within(b)) continue;
+        n += (b.n_identical ?? 0) + (b.n_differ ?? 0) + (b.n_nonfinite ?? 0);
+        same += b.n_identical ?? 0;
+        const e = b.worst_rel_err;
+        if (typeof e === "number" && Number.isFinite(e) && (worst === null || e > worst)) worst = e;
+      }
+      return { n, same, worst };
+    };
+    const summary = (label, x) =>
+      h("span", {}, h("strong", {}, label), ` ${pct(x.n ? x.same / x.n : null)} bit-identical, worst rel err ${num(x.worst, 3)}`);
+    const rangeLine = v
+      ? h("p.range-line", {},
+        h("span", {}, `In this range, ${v[1] - v[0]} of ${columns.length} binades (`, span(), `), ${int(tally(bands).n)} samples: `),
+        summary(me, tally(bands)),
+        t ? [" · ", summary(cmpLabel, tally(tBands))] : null)
+      : null;
+
+    put(slots.bands,
+      h("div.panel-head", {},
+        h("h2", {}, "Worst relative error by binade"),
+        v ? h("button.reset", { onclick: () => { location.hash = zoomHref(null); } }, "Reset view") : null),
+      h("p.note", {}, "The axis is the real line in bit-pattern order. Each bar is one binade, or, where they do not fit, the worst of several. ",
+        h("strong", {}, "Drag across the chart to zoom"), " — the worst inputs and regions below follow the range.",
         t ? ` The line is ${cmpLabel}'s worst relative error over the same binades, against the same base R reference; it breaks where ${cmpLabel} was not swept and rests on the axis where it matches base R exactly.` : ""),
       chart.wrap ?? chart,
+      rangeLine,
       h("div.chart-foot", {},
         h("div.key", {}, Object.values(BEHAVIOUR).map((b) =>
           h("span.key-item", {}, h("i", { class: b.cls }), b.label)), cmpKey),
-        zoomed
-          ? h("button.link", { onclick: () => { app.chartView = null; drawBands(); } },
-            `showing ${app.chartView[1] - app.chartView[0]} of ${chart.nColumns} binades — reset`)
-          : h("span.muted", {}, `${chart.nColumns} binades`)),
+        h("span.muted", {}, v ? `${v[1] - v[0]} of ${columns.length} binades` : `${columns.length} binades`)),
     );
-  };
-  drawBands();
 
-  slots.hist.replaceChildren(
-    h("h2", {}, "Distribution of relative error"),
-    histChart(hist, t ? { label: cmpLabel, rows: tHist } : null),
-    t ? h("div.chart-foot", {}, h("div.key", {},
-      h("span.key-item", {}, h("i.k-anvl"), `${me} (bars)`), cmpKey)) : null,
-  );
+    // --- the histogram: whole result only, and says so when zoomed ---
+    put(slots.hist,
+      h("h2", {}, "Distribution of relative error"),
+      v ? h("p.note", {}, h("strong", {}, "Whole result, not the zoomed range."),
+        " The sweep records this distribution per result rather than per binade, so it cannot follow the zoom; the line under the chart above gives the range's own figures.") : null,
+      histChart(hist, t ? { label: cmpLabel, rows: tHist } : null),
+      t ? h("div.chart-foot", {}, h("div.key", {},
+        h("span.key-item", {}, h("i.k-anvl"), `${me} (bars)`), cmpKey)) : null,
+    );
 
-  // The worst inputs, narrowed to the selected binade when there is one. The
-  // binade is chosen on anvl's axis, and matched by (sign, binade) -- which is
-  // the same interval for any backend at the same precision.
-  const ordered = bands.filter((b) => !b.special)
-    .sort((a, b) => (a.sign < 0 ? -1 : 1) - (b.sign < 0 ? -1 : 1) ||
-      (a.sign < 0 ? b.binade - a.binade : a.binade - b.binade));
-  const sel = binade === null ? null : ordered[binade] ?? null;
+    // --- worst inputs ---
+    const drawDetail = () => {
+      const which = t && app.detailBackend === cmp ? cmp : r.backend;
+      const rows = (which === r.backend ? detail : tDetail).filter(within);
+      const shown = [...rows].sort((a, b) => (b.rel_err ?? -1) - (a.rel_err ?? -1)).slice(0, 25);
+      const tabs = t
+        ? h("div.seg", { role: "tablist", "aria-label": "whose worst inputs" },
+          [r.backend, cmp].map((b) => h("button", {
+            role: "tab",
+            "aria-selected": String(which === b),
+            class: which === b ? "on" : null,
+            onclick: () => { app.detailBackend = b; drawDetail(); },
+          }, backendLabel(b))))
+        : null;
+      put(slots.detail,
+        h("h2", {}, "Worst inputs"),
+        tabs,
+        h("p.note", {},
+          v ? ["The 25 largest relative errors in the zoomed range, ", span(), "."]
+            : "The 25 largest relative errors across the whole sweep. Drag across the chart above to narrow to a range.",
+          t ? " Each backend's worst inputs are its own, so the two lists are generally at different x." : ""),
+        shown.length
+          ? table([
+            { label: "bits" }, { label: "x", align: "r" },
+            { label: backendLabel(which), align: "r" }, { label: "base R", align: "r" },
+            { label: "rel err", align: "r" }, { label: "ulp", align: "r" },
+          ], shown.map((d) => h("tr", {},
+            h("td", {}, h("code.bits", {}, d.bits ?? "")),
+            h("td.r", {}, num(d.x)),
+            h("td.r", {}, num(d.value)),
+            h("td.r", {}, num(d.reference)),
+            h("td.r", {}, num(d.rel_err, 3)),
+            h("td.r", {}, num(d.ulp_err, 3)))))
+          : h("p.muted", {}, v ? "No differing samples recorded in this range." : "No differing samples recorded here."),
+      );
+    };
+    drawDetail();
 
-  const drawDetail = () => {
-    const which = t && app.detailBackend === cmp ? cmp : r.backend;
-    const rows = which === r.backend ? detail : tDetail;
-    const shown = sel
-      ? rows.filter((d) => d.binade === sel.binade && d.sign === sel.sign)
-      : [...rows].sort((a, b) => (b.rel_err ?? -1) - (a.rel_err ?? -1)).slice(0, 25);
-    const tabs = t
-      ? h("div.seg", { role: "tablist", "aria-label": "whose worst inputs" },
-        [r.backend, cmp].map((b) => h("button", {
-          role: "tab",
-          "aria-selected": String(which === b),
-          class: which === b ? "on" : null,
-          onclick: () => { app.detailBackend = b; drawDetail(); },
-        }, backendLabel(b))))
-      : null;
-    slots.detail.replaceChildren(
-      h("h2", {}, "Worst inputs"),
-      tabs,
-      sel
-        ? h("p.note", {}, `Binade ${sel.binade}, ${sel.sign < 0 ? "negative" : "positive"}: `,
-          h("code", {}, num(sel.x_from)), " … ", h("code", {}, num(sel.x_to)), ". ",
-          h("a", { href: cellHref(cellId, output) }, "show the worst overall instead"))
-        : h("p.note", {}, "The 25 largest relative errors across the whole sweep. Click a binade in the chart above to narrow to it.",
-          t ? ` Each backend's worst inputs are its own, so the two lists are generally at different x.` : ""),
-      shown.length
+    // --- regions ---
+    const CLASS_NOTE = {
+      unclassified: "not explained",
+      nan: "input is NaN",
+      subnormal: "subnormal, flushed to zero by XLA",
+      below_support: "below the support of the distribution",
+      above_support: "above the support of the distribution",
+    };
+    const overlaps = (x) => !inView || rangeKeys(x).some((k) => inView.has(k));
+    const tagged = [
+      ...ranges.filter(overlaps).map((x) => ({ ...x, be: r.backend })),
+      ...tRanges.filter(overlaps).map((x) => ({ ...x, be: cmp })),
+    ];
+    const rsorted = tagged.sort((a, b) =>
+      (a.be === r.backend ? 0 : 1) - (b.be === r.backend ? 0 : 1) ||
+      (a.class === "unclassified" ? 0 : 1) - (b.class === "unclassified" ? 0 : 1) ||
+      (b.n_patterns ?? 0) - (a.n_patterns ?? 0));
+    put(slots.ranges,
+      h("h2", {}, "Regions with no finite error"),
+      h("p.note", {}, "Stretches of the input range where no finite relative error could be computed. All but ",
+        h("em", {}, "not explained"), " have a known cause.",
+        v ? [" Shown: regions that reach into ", span(), ", at their full extent."] : ""),
+      rsorted.length
         ? table([
-          { label: "bits" }, { label: "x", align: "r" },
-          { label: backendLabel(which), align: "r" }, { label: "base R", align: "r" },
-          { label: "rel err", align: "r" }, { label: "ulp", align: "r" },
-        ], shown.slice(0, 200).map((d) => h("tr", {},
-          h("td", {}, h("code.bits", {}, d.bits ?? "")),
-          h("td.r", {}, num(d.x)),
-          h("td.r", {}, num(d.value)),
-          h("td.r", {}, num(d.reference)),
-          h("td.r", {}, num(d.rel_err, 3)),
-          h("td.r", {}, num(d.ulp_err, 3)))))
-        : h("p.muted", {}, "No differing samples recorded here."),
+          ...(t ? [{ label: "backend" }] : []),
+          { label: "from", align: "r" }, { label: "to", align: "r" },
+          { label: "bit patterns", align: "r" }, { label: "cause" }],
+          rsorted.map((x) => h("tr", { class: x.class === "unclassified" ? "row-warn" : null },
+            t ? h("td", { class: x.be === cmp ? "cmp" : null }, backendLabel(x.be)) : null,
+            h("td.r", {}, num(x.x_from)),
+            h("td.r", {}, num(x.x_to)),
+            h("td.r", {}, int(x.n_patterns)),
+            h("td", {}, h(`span.pill.${x.class === "unclassified" ? "warn" : "ok"}`, {},
+              CLASS_NOTE[x.class] ?? x.class)))))
+        : h("p.muted", {}, v ? "None in this range." : "None."),
     );
   };
-  drawDetail();
 
-  const CLASS_NOTE = {
-    unclassified: "not explained",
-    nan: "input is NaN",
-    subnormal: "subnormal, flushed to zero by XLA",
-    below_support: "below the support of the distribution",
-    above_support: "above the support of the distribution",
-  };
-  const tagged = [
-    ...ranges.map((x) => ({ ...x, be: r.backend })),
-    ...tRanges.map((x) => ({ ...x, be: cmp })),
-  ];
-  const rsorted = tagged.sort((a, b) =>
-    (a.be === r.backend ? 0 : 1) - (b.be === r.backend ? 0 : 1) ||
-    (a.class === "unclassified" ? 0 : 1) - (b.class === "unclassified" ? 0 : 1) ||
-    (b.n_patterns ?? 0) - (a.n_patterns ?? 0));
-  slots.ranges.replaceChildren(
-    h("h2", {}, "Regions with no finite error"),
-    h("p.note", {}, "Stretches of the input range where no finite relative error could be computed. All but ",
-      h("em", {}, "not explained"), " have a known cause."),
-    rsorted.length
-      ? table([
-        ...(t ? [{ label: "backend" }] : []),
-        { label: "from", align: "r" }, { label: "to", align: "r" },
-        { label: "bit patterns", align: "r" }, { label: "cause" }],
-        rsorted.map((x) => h("tr", { class: x.class === "unclassified" ? "row-warn" : null },
-          t ? h("td", { class: x.be === cmp ? "cmp" : null }, backendLabel(x.be)) : null,
-          h("td.r", {}, num(x.x_from)),
-          h("td.r", {}, num(x.x_to)),
-          h("td.r", {}, int(x.n_patterns)),
-          h("td", {}, h(`span.pill.${x.class === "unclassified" ? "warn" : "ok"}`, {},
-            CLASS_NOTE[x.class] ?? x.class)))))
-      : h("p.muted", {}, "None."),
-  );
+  draw(zoom);
+  app.redrawCell = draw;
 }
 
 // --- wiring ------------------------------------------------------------
@@ -551,13 +616,17 @@ let lastPage = null;
 function route() {
   if (!app.store) return;
   const r = parseRoute();
-  // Picking a binade is a move within the page, not a move to another one.
+  // Zooming is a move within the page, not a move to another one.
   const page = `${r.view}|${r.spec ?? ""}|${r.cellId ?? ""}|${r.output ?? ""}`;
   const samePage = page === lastPage;
   lastPage = page;
   try {
     if (r.view === "spec") renderSpec(r.spec);
-    else if (r.view === "cell") renderCell(r.cellId, r.output, r.binade);
+    else if (r.view === "cell") {
+      // A new zoom on the same result redraws in place: no refetch, no flash.
+      if (samePage && app.redrawCell) app.redrawCell(r.zoom);
+      else renderCell(r.cellId, r.output, r.zoom);
+    }
     else renderOverview();
   } catch (e) {
     console.error(e);

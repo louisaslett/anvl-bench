@@ -195,7 +195,7 @@ URLs carry the whole navigable state, so a finding can be linked from an issue:
 ```
 #/                                                  overview
 #/spec/nv_qnorm                                     one function
-#/cell/<cell_id>/<output>?b=<binade>                one result, one binade
+#/cell/<cell_id>/<output>?z=<from>-<to>             one result, zoomed to a range
 ```
 
 All paths in the site are relative, so it works as a project page today and
