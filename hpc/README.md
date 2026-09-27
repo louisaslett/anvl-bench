@@ -14,28 +14,48 @@ single-platform observation.
 config.sh            the only file you must edit
 Dockerfile           the whole r-xla stack + the harness + JAX, from GitHub
 build.sh             build (amd64) -> save -> scp -> .sif
-submit.sh            submit the array, then the merge that depends on it
+submit.sh            submit sweep -> merge -> validation, each waiting on the last
 calibrate.sh         one shard at quick depth, then its CPU efficiency
-slurm-sweep.sbatch   one array task per shard
-slurm-merge.sbatch   fold the shards into the analysis store
+slurm-sweep.sbatch     1. one array task per shard of the grid
+slurm-merge.sbatch     2. fold the shards into the analysis store
+slurm-validate.sbatch  3. one array task per shard of the references, checked
+                          against MPFR and recorded in the store
 export.sh            head node, no Slurm: store -> anvl-bench release zip
 ```
 
 ## The workflow
 
 ```bash
-# 1. on the Mac — edit config.sh first
+# 1. on the Mac — edit config.sh first, including a new IMAGE_TAG
 ./build.sh all            # or: build / save / ship / sif, one at a time
 
-# 2. on the cluster, in REMOTE_DIR
+# 2. on the cluster, in REMOTE_DIR: check the image before trusting it
+source config.sh && mkdir -p "$SWEEP_ROOT/home" "$SWEEP_ROOT/tmp"
+singularity exec --cleanenv --bind "$SWEEP_ROOT:/sweeps" \
+  --env NV_SWEEP_STORE=/sweeps/selftest-store \
+  --env HOME=/sweeps/home --env TMPDIR=/sweeps/tmp \
+  "$SIF" anvl-sweep selftest
+rm -rf "$SWEEP_ROOT/selftest-store"
+
+# 3. still on the cluster
 ./calibrate.sh submit     # one shard at quick depth, to size CPUS_PER_TASK
 ./calibrate.sh report <jobid>
 ./submit.sh --dry-run     # what shard 1 would take; runs nothing
-./submit.sh               # array + dependent merge
+./submit.sh               # sweep array -> merge -> validation array
 
-# 3. when the merge job has finished
+# 4. when the validation array has finished
 ./export.sh               # -> $SWEEP_ROOT/dist/linux-x86_64-cpu.zip
 ```
+
+The self-test in step 2 is the same one the image build runs, but on the
+cluster's CPUs and filesystem, which is what the sweep will use: its rounding
+and `-0` checks exist to catch a platform difference before a many-hour run
+rather than after. Expect `N/N assertions passed` and exit status 0, and **no**
+"skip the comparator checks" line — that line would mean Rmpfr is missing from
+the image, and step 3's validation would fail. It points at a throwaway store,
+so its runs never mix into the real one. If your site discourages even half a
+minute of work on the login node, prefix the `singularity` line with
+`srun --partition="$PARTITION" --time=00:10:00 --mem=2G`.
 
 Then attach that zip to a Release in this repository and point `DEPLOY_RELEASE`
 at the tag — the ordinary anvl-bench deploy, unchanged.
@@ -62,8 +82,9 @@ path you must get right:
 $SWEEP_ROOT/
   parts/<array job id>/   each array task's own store — write-once, one Parquet
                           file per (run, cell), so no locking and no contention
-  store/                  the analysis store, merged into after the array
-  export/                 the six Parquet files + manifest.json
+  store/                  the analysis store, merged into after the array; the
+                          validation array writes its records here too
+  export/                 the Parquet tables + manifest.json
   dist/<id>.zip           the release asset
   logs/                   Slurm stdout/stderr
   home/  tmp/             HOME and TMPDIR for the container
@@ -77,6 +98,28 @@ The store is keyed by array job id, so two submissions can never mix, and the
 merge runs `afterok` so a partial array is never folded in — `status` counts
 cells against the declared grid, and a half-merged run reads as "never run" for
 everything still missing.
+
+## The validation step
+
+A candidate base R dispute — base R off, anvl accurate, against a spec's
+*stable reference* — is only excluded from the headline figures once that
+reference has passed validation against high precision; gradient references
+are validated too, since every gradient is scored against one. That is
+`anvl-sweep validate-refs`, and the harness README describes what it checks.
+
+It runs as its own array (`slurm-validate.sbatch`) after the merge, because a
+reference is validated from the merged store: each result's exact points,
+disputes and worst inputs, plus every earlier counterexample. It shards by
+**reference unit** — a distinct reference identity — rather than by cell, so an
+anvl cell and its JAX twin, which share a reference, cost one validation drawn
+from both cells' inputs. Each task writes its own record into the store; there
+is nothing to merge.
+
+A shard that fails or runs out of time leaves its references *not validated*,
+which only makes the export more conservative: nothing is excluded without a
+passing record. `./submit.sh --validate-only` re-runs this step alone against
+the store as it stands — after fixing a reference, say. `export.sh` warns if it
+finds no validation records at all.
 
 ## Choices the image makes, and why
 
@@ -108,9 +151,13 @@ everything still missing.
 - **`--cleanenv` on every `singularity exec`.** It strips the *host's*
   environment, not the image's, so the pins above survive and a stray
   `R_LIBS_USER` or `PJRT_*` on the login node cannot leak into a run.
+- **Rmpfr, with the GMP and MPFR libraries,** for the validation step. Nothing
+  else in the harness loads it, and it is in the image rather than left to a
+  laptop so that validation can run wherever is convenient.
 - **The build runs `anvl-sweep selftest`.** A sweep that silently sweeps
   nothing looks exactly like a sweep that found nothing, and at full depth that
-  is an expensive way to find out.
+  is an expensive way to find out. With Rmpfr present it includes the
+  validator's own checks.
 
 ## Cores per task
 
@@ -136,7 +183,7 @@ the whole allocation would only contend with XLA's for the same cores.
 
 ## Sizing the array
 
-`SHARDS=40` is a starting point, not a recommendation. Cells are independent
+`SHARDS` in `config.sh` is a starting point, not a recommendation. Cells are independent
 and the split is `cell_id %% shards`, so any number works — but **every shard
 pays R startup, package load and an XLA compile per distinct cell shape**, so
 40 short shards pay that 40 times. Prefer fewer, longer shards, and size
@@ -150,7 +197,7 @@ same-machine, same-inputs. Set `BACKENDS="anvl"` to halve it.
 Memory is flat in the sample count — the reducers are streaming — so a cell
 cannot grow out of `MEM_PER_TASK`. Walltime is the binding constraint.
 
-One thing to check on a smoke shard before committing to 40 x 4: **XLA
+One thing to check on a smoke shard before committing to a large array: **XLA
 compilation is largely single-threaded**, so a shard's compile phase leaves all
 but one of its cores idle, and the grid pays one compile per distinct cell
 shape *per shard*. If average utilisation comes out low, the better trade is

@@ -45,6 +45,17 @@ MEM_PER_TASK="2G"
 WALLTIME="72:00:00"                  # per array task
 MERGE_WALLTIME="04:00:00"
 
+# The validation array (slurm-validate.sbatch): after the merge, each task
+# checks a share of the references against 256-bit MPFR. Units are distinct
+# reference identities, so an anvl cell and its JAX twin cost one. ~250 units
+# for the whole grid; at smoke depth they averaged ~4 s each, up to a few
+# minutes for the log-scale qnorm ones. Not yet timed at full depth -- the
+# sample counts barely grow with depth, so expect similar. Each task reads the
+# merged store's tables whole, hence the memory.
+VALIDATE_SHARDS=32
+VALIDATE_WALLTIME="04:00:00"
+VALIDATE_MEM="8G"
+
 # ---- what to sweep --------------------------------------------------------
 DEPTH="full"                         # smoke | quick | full
 BACKENDS="anvl,jax"                  # "anvl" alone halves the grid

@@ -53,7 +53,7 @@ step_ship() {
   ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_DIR}'"
   scp "${TARBALL}.gz" "${REMOTE_HOST}:${REMOTE_DIR}/"
   # Also send the job scripts, so the cluster side is self-contained.
-  scp config.sh submit.sh calibrate.sh export.sh slurm-sweep.sbatch slurm-merge.sbatch \
+  scp config.sh submit.sh calibrate.sh export.sh slurm-sweep.sbatch slurm-merge.sbatch slurm-validate.sbatch \
       "${REMOTE_HOST}:${REMOTE_DIR}/"
 }
 

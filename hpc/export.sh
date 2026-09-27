@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # Turn the merged store into an anvl-bench release asset. No Slurm: this reads
-# the store and writes six Parquet files and a manifest, which is seconds to a
+# the store and writes its Parquet tables and a manifest, which is seconds to a
 # couple of minutes even for a full grid -- fine on a login node.
+#
+# Run it after the validation array (slurm-validate.sbatch): the export carries
+# the validation records, and a candidate base R dispute is excluded only where
+# its reference passed validation. Exporting earlier is safe -- nothing is
+# excluded and every reference reads "not validated" -- just less useful.
 #
 #   ./export.sh                 export everything in the store
 #   ./export.sh spec=nv_qnorm   export one function
@@ -39,6 +44,10 @@ mkdir -p "${EXPORT_DIR}" "${DIST}" "${SWEEP_ROOT}/home" "${SWEEP_ROOT}/tmp"
 
 echo "==> exported:"
 ls -lh "${EXPORT_DIR}"
+if [[ ! -f "${EXPORT_DIR}/validations.parquet" ]]; then
+  echo "!! no validation records exported: nothing is excluded, and every reference" >&2
+  echo "!! reads 'not validated'. Run ./submit.sh --validate-only first if you meant to." >&2
+fi
 
 # The platform key the run actually recorded, straight out of the manifest --
 # checked rather than assumed, because an artifact id that disagrees with the
