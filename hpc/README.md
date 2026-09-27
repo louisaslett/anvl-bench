@@ -28,6 +28,9 @@ export.sh            head node, no Slurm: store -> anvl-bench release zip
 ```bash
 # 1. on the Mac — edit config.sh first, including a new IMAGE_TAG
 ./build.sh all            # or: build / save / ship / sif, one at a time
+                          # (ship and sif open one ssh connection in the
+                          #  foreground -- MFA shows here -- and share it;
+                          #  ./build.sh disconnect closes it)
 
 # 2. on the cluster, in REMOTE_DIR: check the image before trusting it
 source config.sh && mkdir -p "$SWEEP_ROOT/home" "$SWEEP_ROOT/tmp"
