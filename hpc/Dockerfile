@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libcurl4-openssl-dev libssl-dev libxml2-dev zlib1g-dev \
       python3 python3-venv python3-dev \
       unzip zip \
+      libgmp-dev libmpfr-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # Under Singularity the container runs as *your* uid while /opt/r-xla is owned
@@ -71,8 +72,11 @@ RUN Rscript -e 'own <- c("anvl","pjrt","stablehlo","tengen","xlamisc"); \
       if (length(miss)) stop("failed to install: ", paste(miss, collapse = ", "))'
 
 # The harness itself: nanoparquet + cli always, reticulate for --backends jax,
-# DBI + duckdb for query.R's sw_sql().
-RUN install2.r --error --skipinstalled nanoparquet cli reticulate DBI duckdb
+# DBI + duckdb for query.R's sw_sql(), and Rmpfr for `validate-refs`, which
+# checks the stable and gradient references against high precision (it needs
+# the GMP and MPFR libraries installed above; nothing else in the harness
+# uses it, so a sweep never loads it).
+RUN install2.r --error --skipinstalled nanoparquet cli reticulate DBI duckdb Rmpfr
 
 # ---- the stack, in dependency order (as _setup.sh) ------------------------
 RUN R CMD INSTALL ${R_XLA_ROOT}/tengen \
@@ -156,7 +160,8 @@ RUN printf '%s\n' \
 
 WORKDIR /opt/r-xla/anvl/benchmarks/api-distributions
 
-# A build that cannot run the engine is not worth shipping. ~10 s. The store is
+# A build that cannot run the engine is not worth shipping. ~30 s, and with
+# Rmpfr present it includes the validator's own checks. The store is
 # a throwaway: a real one belongs on bind-mounted space, and baking result files
 # into the image would make them look like a run that happened on the cluster.
 RUN NV_SWEEP_STORE=/tmp/selftest-store anvl-sweep selftest \

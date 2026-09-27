@@ -10,8 +10,8 @@ IMAGE_NAME="anvl-sweeps"
 # A LITERAL, never $(date): config.sh is sourced by every script, so a computed
 # date tag changes the .sif path at midnight and the image built yesterday
 # stops being found. Bump it by hand when you build a new image, or override it
-# for one command:  IMAGE_TAG=20260919 ./build.sh all
-IMAGE_TAG="${IMAGE_TAG:-20260918}"
+# for one command:  IMAGE_TAG=20260926 ./build.sh all
+IMAGE_TAG="${IMAGE_TAG:-20260926}"
 DOCKER_PLATFORM="linux/amd64"        # the cluster's arch, not the Mac's
 ANVL_REF="sweep-benchmarks"          # branch of louisaslett/anvl to build
 ANVL_REPO="https://github.com/louisaslett/anvl.git"
