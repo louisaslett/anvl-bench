@@ -408,9 +408,10 @@ export function snippet(ctx) {
   const baseCall = `${sp.base}(x${refArgs}, ${baseFlags})`;
   const xComment = rNum(x) === dec(x) ? "" : `  # ${dec(x)}, written exactly: R's decimal parser is not correctly rounded everywhere`;
 
-  if (r.backend !== "jax") {
-    const beArgs = isDefault && !differ ? "" : `, ${p1}, ${p2}`;
-    const call = kind === "value"
+  // anvl's own evaluation, which the JAX snippet runs too: anvl is the
+  // subject, and where JAX is out is exactly where anvl is worth a look.
+  const beArgs = isDefault && !differ ? "" : `, ${p1}, ${p2}`;
+  const call = kind === "value"
       ? [`anvl_value <- as.double(${r.spec}(nv_array(rep(x, n), dtype = "${dtype}")${beArgs}, ${flagsR}))[1]`]
       : [
         `grad_fn <- jit(gradient(`,
@@ -424,6 +425,8 @@ export function snippet(ctx) {
         `)`,
         `anvl_value <- as.double(g$${output})[1]`,
       ];
+
+  if (r.backend !== "jax") {
     const lines = [
       ...header("#"),
       "",
@@ -461,12 +464,14 @@ export function snippet(ctx) {
       `jax_value = float(g(jnp.full(n, x, dtype=${jdt}), ${q1}, ${q2})[0])`,
     ];
   const rCode = [
+    "library(anvl)",
     `x <- ${rNum(x)}`,
-    ...(differ ? [`ref_${p1} <- ${rNum(refP[p1])}; ref_${p2} <- ${rNum(refP[p2])}  # rounded to f32: what the reference is given`]
-      : isDefault ? [] : [`${p1} <- ${rParam(beP[p1])}; ${p2} <- ${rParam(beP[p2])}`]),
+    ...paramLines("R"),
+    BATCH_R,
+    ...call,
     refIsBase ? `base_value <- ${baseCall}` : null,
     ...truthBlock,
-    `cat(sprintf("%.17g", c(${refIsBase ? "base_value, " : ""}mpfr_value)))`,
+    `cat(sprintf("%.17g", c(anvl_value, ${refIsBase ? "base_value, " : ""}mpfr_value)))`,
   ].filter((l) => l !== null);
   const lines = [
     ...header("#"),
@@ -484,17 +489,19 @@ export function snippet(ctx) {
     BATCH_PY,
     ...jaxCall,
     "",
-    `# ${refIsBase ? "base R and " : ""}the ${PREC}-bit truth, from R (needs the Rmpfr package)`,
+    `# anvl, ${refIsBase ? "base R " : ""}and the ${PREC}-bit truth at the same input, from R (needs anvl and Rmpfr)`,
     'r_code = r"""',
     ...rCode,
     '"""',
     'out = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=True).stdout',
-    `${refIsBase ? "base_value, mpfr_value" : "(mpfr_value,)"} = [None if v == "NA" else float(v) for v in out.split()]`,
+    `anvl_value, ${refIsBase ? "base_value, " : ""}mpfr_value = [None if v == "NA" else float(v) for v in out.split()]`,
     "",
     PY_ERR,
     "",
-    `for label, v in [("JAX", jax_value), ${refIsBase ? '("base R", base_value), ' : ""}("MPFR", mpfr_value)]:`,
+    `for label, v in [("JAX", jax_value), ("anvl", anvl_value), ${refIsBase ? '("base R", base_value), ' : ""}("MPFR", mpfr_value)]:`,
     `    print(f"{label:<8} {v!r}")  # repr: the shortest decimal that round-trips`,
+    refIsBase ? `show_err("anvl vs base R", anvl_value, base_value, ${precPy})` : null,
+    `show_err("anvl vs MPFR", anvl_value, mpfr_value, ${precPy})`,
     refIsBase ? `show_err("JAX vs base R", jax_value, base_value, ${precPy})` : null,
     `show_err("JAX vs MPFR", jax_value, mpfr_value, ${precPy})`,
     refIsBase ? `show_err("base R vs MPFR", base_value, mpfr_value, 52, -1022)` : null,
