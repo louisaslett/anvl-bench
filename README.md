@@ -54,6 +54,17 @@ MPFR: its status (the harness's, failing closed), worst error against the
 declared bound, how it was sampled, and its worst samples. One validation
 serves an anvl result and its JAX twin, which share a reference.
 
+**Reproducing an input.** On a result page, every input in a table (its `x` or
+its bits) copies a self-contained script when clicked: R for anvl, Python for
+JAX. It evaluates that one input exactly as the harness did (same call, same
+parameters, in a batch), computes base R and a 256-bit Rmpfr truth beside it,
+and prints the relative and ulp errors by the harness's own definitions. The
+figures this site recorded are in its header, so a reader sees at once whether
+their platform agrees. Inputs are written as hex literals, because R's decimal
+parser is not correctly rounded on every platform (on Apple Silicon most
+17-digit literals parse to a neighbouring double). `js/snippet.js` ports the
+harness's calls and MPFR truths; keep it in step with the sweeps.
+
 ## Comparing with JAX
 
 When an artifact also holds JAX results (the harness's `--backends anvl,jax`),
@@ -229,6 +240,7 @@ js/store.js             what to read and how little of it
 js/model.js             result state, classes, categories: the harness's rules
 js/chart.js             hand-written SVG; no charting library
 js/app.js               router and views
+js/snippet.js           the copy-to-clipboard reproduction scripts
 tools/serve.mjs         range-capable dev server
 tools/build-data-index.mjs
 .github/workflows/deploy.yml

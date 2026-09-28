@@ -13,6 +13,7 @@ import { listDeployed, urlSource, fileSource } from "./source.js";
 import { openStore } from "./store.js";
 import { binadeChart, histChart, bandKey, BEHAVIOUR } from "./chart.js";
 import { num, int, pct, cellParts, flagList } from "./fmt.js";
+import { snippet } from "./snippet.js";
 import { CLASSES, CATEGORIES, CAUSES, REF_STATUS, state, headline } from "./model.js";
 
 // --- tiny DOM helper ---------------------------------------------------
@@ -70,6 +71,67 @@ const jump = (id, text) => h("button.link", {
   type: "button",
   onclick: () => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }),
 }, text);
+// --- reproducing one input ----------------------------------------------
+
+let toastTimer = null;
+function toast(msg, cls = "") {
+  let t = document.getElementById("toast");
+  if (!t) {
+    t = h("div.toast", { id: "toast", role: "status", "aria-live": "polite" });
+    document.body.append(t);
+  }
+  t.className = `toast show ${cls}`.trim();
+  t.textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast"; }, 3200);
+}
+
+// The async clipboard needs a secure context; a local copy opened from file://
+// is not one, so fall back to a selected textarea.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = h("textarea", { style: "position:fixed;opacity:0", readonly: "" });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }
+}
+
+/** What the site recorded for one input of a result, labelled for a snippet. */
+const recOf = (res, value, reference, rel = null, ulp = null, extra = []) => [
+  [backendLabel(res.backend), value],
+  [res.kind === "grad" ? "reference" : "base R", reference],
+  ["rel err", rel],
+  ["ulp err", ulp],
+  ...extra,
+];
+
+/**
+ * An input the reader can click to copy a script that reproduces it: R for
+ * anvl, Python for JAX, each with base R and a 256-bit MPFR truth beside it
+ * and the figures recorded here in its header. Built on click, not per row.
+ */
+const repro = (content, res, x, bits, where, recorded = []) => {
+  if (!res || typeof x !== "number") return content;
+  const lang = res.backend === "jax" ? "Python" : "R";
+  return h("button.repro", {
+    type: "button",
+    title: `${bits ? bits + " · " : ""}click to copy ${lang === "R" ? "an R" : "a Python"} script that reproduces this input on your machine`,
+    onclick: async () => {
+      const s = snippet({ result: res, run: app.store.runById.get(res.run_id), x, bits, recorded, where });
+      if (!s) return toast("No reproduction is available for this function.", "error");
+      const ok = await copyText(s.text);
+      toast(ok ? `Copied ${s.lang} script for ${res.spec} at ${num(x, 6)}` : "Could not copy to the clipboard", ok ? "" : "error");
+    },
+  }, content);
+};
+
 const catPill = (cat, text = null) => {
   const c = CATEGORIES[cat] ?? { label: cat, cls: "neutral" };
   return pill(c.cls, text ?? c.label, c.hint ?? null);
@@ -534,7 +596,10 @@ async function renderCell(cellId, output, zoom) {
     h("td.r", {}, c?.n_rounded ? int(c.n_rounded) : "—"),
     h("td.r", {}, worstWithExcl(c, st.verified, "worst_out_normal")),
     h("td.r", {}, worstWithExcl(c, st.verified, "worst_rel_err")),
-    h("td.r", {}, c && c.worst_rel_err > 0 ? h("span", { title: c.worst_bits ?? "" }, num(c.worst_x)) : "—"),
+    h("td.r", {}, c && c.worst_rel_err > 0
+      ? repro(num(c.worst_x), r, c.worst_x, c.worst_bits, `worst input, ${k === "all" ? "all inputs" : CLASSES[k].long}`,
+        recOf(r, c.worst_value, c.worst_reference, c.worst_rel_err))
+      : "—"),
     t ? h("td.r.cmp", {}, pct(frac(tc))) : null,
     t ? h("td.r", {}, worstWithExcl(tc, tst.verified, "worst_out_normal")) : null);
   const asClass = (x) => x && ({
@@ -568,7 +633,9 @@ async function renderCell(cellId, output, zoom) {
     ["worst relative error", (x) => num(x.worst_rel_err)],
     ["worst ulp error", (x) => num(x.worst_ulp_err), "the worst ulp error over every sample, which need not be the worst relative error's sample"],
     ["bit-identical to base R", (x) => pct(x.n_exact / x.n_samples)],
-    ["worst relative error at x", (x) => [num(x.worst_x), " ", h("code.bits", {}, x.worst_bits ?? "")]],
+    ["worst relative error at x", (x) => [
+      repro(num(x.worst_x), x, x.worst_x, x.worst_bits, "worst relative error", recOf(x, x.worst_value, x.worst_reference, x.worst_rel_err)), " ",
+      repro(h("code.bits", {}, x.worst_bits ?? ""), x, x.worst_x, x.worst_bits, "worst relative error", recOf(x, x.worst_value, x.worst_reference, x.worst_rel_err))]],
     ["its value there", (x) => num(x.worst_value)],
     ["base R there", (x) => num(x.worst_reference)],
     ["exact points: worst finite error", (x) => (x.worst_point_rel_err > 0 ? [num(x.worst_point_rel_err), " at ", h("code", {}, x.worst_point_label ?? "")] : "0")],
@@ -814,6 +881,8 @@ async function renderCell(cellId, output, zoom) {
     const drawDetail = () => {
       const which = whose("detail");
       const rows = (which === r.backend ? detail : tDetail).filter((d) => within(detailKey(d)));
+      const res = which === r.backend ? r : t;
+      const dRepro = (content, d) => repro(content, res, d.x, d.bits, "worst inputs", recOf(res, d.value, d.reference, d.rel_err, d.ulp_err));
       const shown = [...rows].sort((a, b) => (b.rel_err ?? -1) - (a.rel_err ?? -1)).slice(0, 25);
       put(slots.detail,
         h("h2", {}, "Worst inputs"),
@@ -828,8 +897,8 @@ async function renderCell(cellId, output, zoom) {
             { label: backendLabel(which), align: "r" }, { label: "base R", align: "r" },
             { label: "rel err", align: "r" }, { label: "ulp", align: "r" }, { label: "" },
           ], shown.map((d) => h("tr", {},
-            h("td", {}, h("code.bits", {}, d.bits ?? "")),
-            h("td.r", {}, num(d.x)),
+            h("td", {}, dRepro(h("code.bits", {}, d.bits ?? ""), d)),
+            h("td.r", {}, dRepro(num(d.x), d)),
             h("td.r", {}, num(d.value)),
             h("td.r", {}, num(d.reference)),
             h("td.r", {}, num(d.rel_err, 3)),
@@ -860,6 +929,9 @@ async function renderCell(cellId, output, zoom) {
     const drawPoints = () => {
       const which = whose("points");
       const all = which === r.backend ? points : tPoints;
+      const res = which === r.backend ? r : t;
+      const pRepro = (content, p) => repro(content, res, p.x, p.bits, `exact point ${nameOf(p)}`,
+        recOf(res, p.value, p.reference, p.rel_err, p.ulp_err, p.stable !== null && p.stable !== undefined ? [["stable ref", p.stable]] : []));
       const inRange = all.filter((p) => within(keyOfBits(p.bits)));
       // Rows for everything that differs in value; a sign-of-zero difference
       // alone is one line, so two dozen of them cannot bury a failure.
@@ -886,8 +958,8 @@ async function renderCell(cellId, output, zoom) {
           [...bad].sort((a, b) => order(a) - order(b) || (b.rel_err ?? 0) - (a.rel_err ?? 0)).map((p) =>
             h("tr", { class: p.failure && p.category === "failure" ? "row-warn" : null },
               h("td.wrap", { title: p.role }, h("code", {}, nameOf(p))),
-              h("td.r", {}, num(p.x)),
-              h("td", {}, h("code.bits", {}, p.bits)),
+              h("td.r", {}, pRepro(num(p.x), p)),
+              h("td", {}, pRepro(h("code.bits", {}, p.bits), p)),
               h("td.r", {}, num(p.value)),
               h("td.r", {}, num(p.reference)),
               h("td", {}, pointWhat(p)))))
@@ -909,15 +981,21 @@ async function renderCell(cellId, output, zoom) {
       (a.be === r.backend ? 0 : 1) - (b.be === r.backend ? 0 : 1) ||
       (catOrder[a.category] ?? 9) - (catOrder[b.category] ?? 9) ||
       (b.n_patterns ?? 0) - (a.n_patterns ?? 0));
+    const resOf = (x) => (x.be === r.backend ? r : t);
     const extent = (x) => {
       // f32 bounds are sampled inputs; f64 bounds are those of the 2^32-pattern
-      // blocks the failing samples fell in, not inputs that were evaluated.
-      if (x.bounds_are_samples) return [h("td.r", {}, num(x.x_from)), h("td.r", {}, num(x.x_to))];
+      // blocks the failing samples fell in, not inputs that were evaluated --
+      // so only sampled inputs offer a reproduction.
+      const res = resOf(x);
+      if (x.bounds_are_samples) {
+        return [h("td.r", {}, repro(num(x.x_from), res, x.x_from, x.bits_from, "region start")),
+          h("td.r", {}, repro(num(x.x_to), res, x.x_to, x.bits_to, "region end"))];
+      }
       return [
         h("td.r", { title: `block bounds; sampled failing inputs from ${num(x.sampled_from)} to ${num(x.sampled_to)}` },
-          num(x.x_from), h("div.muted.small", {}, `sampled ${num(x.sampled_from)}`)),
+          num(x.x_from), h("div.muted.small", {}, "sampled ", repro(num(x.sampled_from), res, x.sampled_from, x.sampled_bits_from, "first sampled failing input of a region"))),
         h("td.r", { title: `block bounds; sampled failing inputs from ${num(x.sampled_from)} to ${num(x.sampled_to)}` },
-          num(x.x_to), h("div.muted.small", {}, `sampled ${num(x.sampled_to)}`)),
+          num(x.x_to), h("div.muted.small", {}, "sampled ", repro(num(x.sampled_to), res, x.sampled_to, x.sampled_bits_to, "last sampled failing input of a region"))),
       ];
     };
     put(slots.ranges,
@@ -943,7 +1021,8 @@ async function renderCell(cellId, output, zoom) {
               x.evidence ? h("div.muted.small", {}, x.evidence) : null),
             h("td.small", {}, x.pairs ?? ""),
             h("td.small", {}, x.rep_x !== null && x.rep_x !== undefined
-              ? [h("code", { title: x.rep_bits ?? "" }, num(x.rep_x)), `: ${num(x.rep_value)} vs ${num(x.rep_reference)}`]
+              ? [repro(h("code", {}, num(x.rep_x)), resOf(x), x.rep_x, x.rep_bits, "a region's example input", recOf(resOf(x), x.rep_value, x.rep_reference)),
+                `: ${num(x.rep_value)} vs ${num(x.rep_reference)}`]
               : ""))))
         : h("p.muted", {}, v ? "None in this range." : "None."),
     );
@@ -972,7 +1051,8 @@ async function renderCell(cellId, output, zoom) {
             { label: "|base R − s|", align: "r" }, { label: "tolerance", align: "r" }],
           ex.map((d) => h("tr", {},
             h("td", {}, d.kind === "shared" ? pill("warn", "both off", "anvl and base R agree, and both are beyond anvl's tolerance") : pill("neutral", "candidate")),
-            h("td.r", {}, h("span", { title: d.bits }, num(d.x))),
+            h("td.r", {}, repro(num(d.x), r, d.x, d.bits, "dispute with base R",
+              recOf(r, d.value, d.reference, null, null, [["stable ref", d.stable]]))),
             h("td.r", {}, num(d.value, 6)), h("td.r", {}, num(d.reference, 6)), h("td.r", {}, num(d.stable, 6)),
             h("td.r", {}, num(d.d_anvl, 3)), h("td.r", {}, num(d.t_anvl, 3)),
             h("td.r", {}, num(d.d_base, 3)), h("td.r", {}, num(d.t_base, 3)))))
@@ -1032,7 +1112,9 @@ async function drawValidation(slot, r, t) {
                 { label: "MPFR truth", align: "r" }, { label: "error, ulp", align: "r" }],
               samples.slice().sort((a, b) => (b.err_ulp64 ?? 0) - (a.err_ulp64 ?? 0)).slice(0, 20).map((x) =>
                 h("tr", { class: x.pass === false ? "row-warn" : null },
-                  h("td.small", {}, x.source), h("td.r", {}, h("span", { title: x.bits }, num(x.x))),
+                  h("td.small", {}, x.source),
+                  h("td.r", {}, repro(num(x.x), s.result(x.cell_id, x.output) ?? r, x.x, x.bits, `validation sample (${x.source})`,
+                    [["harness ref", x.ref], ["MPFR truth", x.truth], ["error, f64 ulp", x.err_ulp64]])),
                   h("td.r", {}, num(x.ref, 6)), h("td.r", {}, num(x.truth, 6)), h("td.r", {}, num(x.err_ulp64, 3))))))
             : null,
         ]));
