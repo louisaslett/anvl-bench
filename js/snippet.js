@@ -319,6 +319,9 @@ def show_err(label, f, g, p, emin):
 // n = 1 it keeps (q - min) / (max - min) a true division, at n >= 2 it
 // multiplies by a hoisted reciprocal, 1 ulp apart (nv_punif, measured). Where
 // in the batch the input sits does not matter.
+// Printed before the results: base R, XLA and libm are built differently per
+// platform (e.g. fused multiply-add), so a value can differ by an ulp or two.
+const CAVEAT = 'Note: results may differ from the web interface unless run on exactly the same setup as the benchmark environment.';
 const BATCH_R = "n <- 1024  # evaluated in a batch, as the sweep is: XLA compiles a lone element differently";
 const BATCH_PY = "n = 1024  # evaluated in a batch, as the sweep is: XLA compiles a lone element differently";
 
@@ -442,6 +445,7 @@ export function snippet(ctx) {
       "",
       R_ERR,
       "",
+      `cat(${JSON.stringify(CAVEAT)}, "\\n", sep = "")`,
       `cat(sprintf("%-8s %.17g\\n", c("anvl", ${refIsBase ? '"base R", ' : ""}"MPFR"), c(anvl_value, ${refIsBase ? "base_value, " : ""}mpfr_value)), sep = "")`,
       refIsBase ? `show_err("anvl vs base R", anvl_value, base_value, ${prec})` : null,
       `show_err("anvl vs MPFR", anvl_value, mpfr_value, ${prec})`,
@@ -498,6 +502,7 @@ export function snippet(ctx) {
     "",
     PY_ERR,
     "",
+    `print(${JSON.stringify(CAVEAT)})`,
     `for label, v in [("JAX", jax_value), ("anvl", anvl_value), ${refIsBase ? '("base R", base_value), ' : ""}("MPFR", mpfr_value)]:`,
     `    print(f"{label:<8} {v!r}")  # repr: the shortest decimal that round-trips`,
     refIsBase ? `show_err("anvl vs base R", anvl_value, base_value, ${precPy})` : null,
