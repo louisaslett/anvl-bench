@@ -30,16 +30,25 @@ const PLOT_W = W - PAD.l - PAD.r;
 const PLOT_H = H - PAD.t - PAD.b;
 
 /**
- * Order the bands along the real line, which is also bit-pattern order:
- * most negative first (sign -1, highest binade) down through -0, then +0 up
- * to the largest positive. The top exponent field is not an interval -- it
- * holds both infinities and every NaN -- so it is pulled out and shown as a
- * marker at each end rather than as part of the axis.
+ * A band's key along the axis: sign and binade, or sign and "z" for the band
+ * holding the sweep's ±0 samples, which the harness keeps apart from binade
+ * 0's subnormals. The same key names the same interval for any backend at one
+ * precision, which is what lets a comparator and a zoom line up.
+ */
+export const bandKey = (b) => (b.zero ? `${b.sign}:z` : `${b.sign}:${b.binade}`);
+
+/**
+ * Order the bands along the real line: most negative first (sign -1, highest
+ * binade) down through the negative subnormals to -0, then +0, the positive
+ * subnormals and up to the largest positive. The top exponent field is not an
+ * interval -- it holds both infinities and every NaN -- so it is pulled out and
+ * shown as a marker at each end rather than as part of the axis.
  */
 export function orderBands(bands) {
   const finite = bands.filter((b) => !b.special);
-  const neg = finite.filter((b) => b.sign < 0).sort((a, b) => b.binade - a.binade);
-  const pos = finite.filter((b) => b.sign > 0).sort((a, b) => a.binade - b.binade);
+  const rank = (b) => (b.zero ? -1 : b.binade); // zero sits nearest the sign change
+  const neg = finite.filter((b) => b.sign < 0).sort((a, b) => rank(b) - rank(a));
+  const pos = finite.filter((b) => b.sign > 0).sort((a, b) => rank(a) - rank(b));
   return {
     columns: [...neg, ...pos],
     zeroAt: neg.length,
@@ -87,7 +96,7 @@ function compareOf(columns, from, to, byKey) {
   let present = false;
   let err = null;
   for (let i = from; i < to; i++) {
-    const c = byKey.get(`${columns[i].sign}:${columns[i].binade}`);
+    const c = byKey.get(bandKey(columns[i]));
     if (!c) continue;
     present = true;
     const e = c.worst_rel_err;
@@ -110,7 +119,7 @@ function compareOf(columns, from, to, byKey) {
  * just a different colour -- on the same axis, since both are the same
  * quantity: relative error against the same base R reference.
  */
-export function binadeChart({ bands, view, onZoom, compare = null, support = null }) {
+export function binadeChart({ bands, view, onZoom, compare = null, domain = null }) {
   const { columns, zeroAt, special } = orderBands(bands);
   const wrap = document.createElement("div");
   wrap.className = "chart";
@@ -126,7 +135,7 @@ export function binadeChart({ bands, view, onZoom, compare = null, support = nul
   const nBuckets = Math.min(n, Math.floor(PLOT_W / 2));
   const buckets = [];
   const cmpByKey = new Map(
-    (compare?.bands ?? []).filter((b) => !b.special).map((b) => [`${b.sign}:${b.binade}`, b]));
+    (compare?.bands ?? []).filter((b) => !b.special).map((b) => [bandKey(b), b]));
   for (let j = 0; j < nBuckets; j++) {
     const from = i0 + Math.floor((j * n) / nBuckets);
     const to = Math.max(i0 + Math.floor(((j + 1) * n) / nBuckets), from + 1);
@@ -177,13 +186,16 @@ export function binadeChart({ bands, view, onZoom, compare = null, support = nul
       ? "worst relative error against base R"
       : "no finite error anywhere in this result")));
 
-  // Input classes, as backgrounds behind the bars: where a large relative error
-  // is expected rather than alarming. Binade 0 holds zero and the subnormals;
-  // a band wholly outside the support has a fixed right answer. Shading runs of
-  // columns (not buckets) keeps the extent exact at any zoom.
+  // Input classes, as backgrounds behind the bars (input_class() in the
+  // harness): the ±0 column, the subnormals of binade 0, and bands wholly
+  // outside the valid input domain -- where the value is NaN by specification.
+  // The distribution's support plays no part: a CDF below it still has an
+  // ordinary answer. Shading runs of columns (not buckets) keeps the extent
+  // exact at any zoom.
   const classOf = (c) =>
-    c.binade === 0 ? "sub"
-      : support && (c.x_to < support[0] || c.x_from > support[1]) ? "oos" : null;
+    c.zero ? "zero"
+      : c.binade === 0 ? "sub"
+        : domain && (c.x_to < domain[0] || c.x_from > domain[1]) ? "oos" : null;
   svg.append(el("defs", {}, el("pattern", {
     id: "hatch-oos", width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)",
   }, el("line", { class: "hatch", x1: 0, y1: 0, x2: 0, y2: 6 }))));
@@ -200,7 +212,7 @@ export function binadeChart({ bands, view, onZoom, compare = null, support = nul
       runStart = i;
     }
   }
-  const CLASS_NAME = { sub: "zero & subnormal", oos: "outside the support" };
+  const CLASS_NAME = { zero: "±0", sub: "subnormal", oos: "outside the domain" };
   const inputsOf = (b) => {
     const seen = new Set();
     for (let i = b.from; i < b.to; i++) seen.add(CLASS_NAME[classOf(columns[i])] ?? "normal");
@@ -223,7 +235,7 @@ export function binadeChart({ bands, view, onZoom, compare = null, support = nul
       height: Math.max(base - top, 1.5).toFixed(2),
     });
     const wb = b.worstBand;
-    const spanTxt = (b.to - b.from > 1 ? `${b.to - b.from} binades` : `binade ${wb.binade}`) +
+    const spanTxt = (b.to - b.from > 1 ? `${b.to - b.from} binades` : wb.zero ? `${wb.sign < 0 ? MINUS : "+"}0 exactly` : `binade ${wb.binade}`) +
       ` \u2014 inputs: ${inputsOf(b)}`;
     const tip =
       `${spanTxt}\n${wb.sign < 0 ? MINUS : "+"} ${num(Math.abs(wb.x_from))} \u2026 ${num(Math.abs(wb.x_to))}\n` +

@@ -16,7 +16,10 @@
 
 import { asyncBufferFromUrl } from "./hyparquet.js";
 
-const TABLES = ["runs", "summary", "detail", "bands", "hist", "ranges", "categories"];
+const TABLES = [
+  "runs", "summary", "detail", "bands", "hist", "ranges", "categories",
+  "points", "kinds", "disputes", "validations", "validation_samples",
+];
 
 /** Wrap a File so hyparquet can range-read it without loading it all. */
 const fileBuffer = (f) => ({

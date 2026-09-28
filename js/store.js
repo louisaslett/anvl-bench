@@ -3,12 +3,12 @@
 //
 // Read strategy, in three tiers:
 //
-//   eager    manifest.json + summary.parquet + runs.parquet. ~32 kB, two
-//            round trips, and it is enough to render the overview and every
-//            function page without touching another byte.
-//   whole    hist and ranges, ~265 kB between them, read once on the first
-//            leaf page and kept.
-//   by cell  detail (46 MB) and bands (7.4 MB) are sorted by cell with a row
+//   eager    manifest.json + summary, runs, categories and validations: small,
+//            and enough to render the overview and every function page
+//            without touching another byte.
+//   whole    hist, ranges and validation_samples, read once on the first leaf
+//            page and kept.
+//   by cell  detail, bands, points and disputes are sorted by cell with a row
 //            group boundary at each cell, and the footer carries exact
 //            min/max statistics on cell_id. So the row group holding a cell
 //            is found from the footer alone and read on its own: measured at
@@ -16,9 +16,12 @@
 
 import { parquetMetadataAsync, parquetReadObjects } from "./hyparquet.js";
 
-const EAGER = ["summary", "runs", "categories"];
-const WHOLE = ["hist", "ranges"];
-const BY_CELL = ["detail", "bands"];
+const EAGER = ["summary", "runs", "categories", "validations"];
+const WHOLE = ["hist", "ranges", "validation_samples"];
+const BY_CELL = ["detail", "bands", "points", "disputes"];
+
+/** The oldest artifact layout this site reads (the harness's SCHEMA_VERSION). */
+export const SCHEMA = 7;
 
 const SEP = "␟"; // never appears in a cell_id or an output name
 
@@ -33,6 +36,14 @@ function asText(v) {
 
 export async function openStore(source) {
   const manifest = source.manifest;
+  // Every figure on this site rests on how the harness classified it, and that
+  // changed shape between versions: reading an older artifact with this code
+  // would mislabel regions rather than fail. Say so instead.
+  if (!(Number(manifest.schema_version) >= SCHEMA)) {
+    throw new Error(
+      `This artifact was exported with schema version ${manifest.schema_version ?? "unknown"}; this site reads ` +
+      `version ${SCHEMA} and later. Re-export it with the current harness (Rscript run.R export).`);
+  }
   const meta = new Map();
   const whole = new Map();
 
@@ -58,7 +69,7 @@ export async function openStore(source) {
   const listed = (t) =>
     source.has(t) && (manifest.files ?? []).some((f) => f.table === t && f.rows > 0);
 
-  const [summary, runs, categories] = await Promise.all([
+  const [summary, runs, categories, validations] = await Promise.all([
     readAll("summary"),
     // The fingerprint is nice to have, not load-bearing: a partial artifact
     // (just manifest + summary) should still open.
@@ -66,6 +77,10 @@ export async function openStore(source) {
     // Figures by input class: a few rows per result, small enough to read up
     // front, which is what lets the overview show normal-input accuracy.
     listed("categories") ? readAll("categories").catch(() => []) : [],
+    // Every validation of a reference these results were scored with or
+    // disputed by. Keyed by reference identity, not by cell: one validation
+    // serves an anvl cell and its JAX twin alike.
+    listed("validations") ? readAll("validations").catch(() => []) : [],
   ]);
 
   /**
@@ -101,7 +116,7 @@ export async function openStore(source) {
 
   /** Every row of `table` belonging to one cell (all of its outputs). */
   async function cellRows(table, cellId, columns) {
-    if (!source.has(table)) return [];
+    if (!source.has(table) || !listed(table)) return [];
     if (WHOLE.includes(table)) {
       if (!whole.has(table)) whole.set(table, readWhole(table));
       return (await whole.get(table)).filter((r) => r.cell_id === cellId);
@@ -161,10 +176,26 @@ export async function openStore(source) {
     byClass.get(k)[c.input_class] = c;
   }
 
+  /** The validations of one reference identity (for a gradient, one output). */
+  const validationsOf = (refId, output = null) =>
+    refId ? validations.filter((v) => v.ref_id === refId && (output === null || v.output === output)) : [];
+
+  /** The recorded samples of one reference in one validation run -- a run
+   * covers every reference, so the identity and output select this one's. */
+  const samplesOf = async (validationId, refId, output) => {
+    if (!listed("validation_samples")) return [];
+    if (!whole.has("validation_samples")) whole.set("validation_samples", readWhole("validation_samples"));
+    return (await whole.get("validation_samples"))
+      .filter((s) => s.validation_id === validationId && s.ref_id === refId && s.output === output);
+  };
+
   return {
     source,
     manifest,
     summary: subject,
+    validationsOf,
+    samplesOf,
+    has: listed,
     runs,
     runById,
     specs,
@@ -182,6 +213,3 @@ export async function openStore(source) {
   };
 }
 
-/** Does this result disagree with base R somewhere nothing explains? */
-export const isUnexplained = (r) =>
-  r.unexplained_from !== null && r.unexplained_from !== undefined;

@@ -345,9 +345,11 @@ button.reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
    mistaken for one of the behaviour colours on the bars in front. */
 .binade-svg .bg { pointer-events: none; }
 .binade-svg .bg-sub { fill: var(--ink-soft); fill-opacity: 0.12; }
+.binade-svg .bg-zero { fill: var(--ink-soft); fill-opacity: 0.28; }
 .binade-svg .bg-oos { fill: url(#hatch-oos); }
 .binade-svg .hatch { stroke: var(--ink-soft); stroke-opacity: 0.35; stroke-width: 1.5; }
 i.k-bg-sub { background: var(--ink-soft); opacity: 0.25; }
+i.k-bg-zero { background: var(--ink-soft); opacity: 0.5; }
 i.k-bg-oos {
   background: repeating-linear-gradient(45deg, var(--ink-soft) 0 1px, transparent 1px 4px);
   opacity: 0.6; border: 1px solid var(--line);
@@ -371,6 +373,37 @@ i.k-bg-oos {
 /* Grouped table headers: a rule starts each group. */
 table.grid tr.groups th { font-size: 0.72rem; font-weight: 600; border-bottom: 0; padding-bottom: 0; }
 table.grid th.grp, table.grid td.grp { border-left: 1px solid var(--line); }
-.classes td.expect { color: var(--ink-soft); font-size: 0.8rem; max-width: 20rem; }
+.compare.classes table.grid th.cls { white-space: normal; min-width: 9rem; max-width: 15rem; }
+.classes .expect { color: var(--ink-soft); font-size: 0.74rem; font-weight: 400; line-height: 1.3; margin-top: 0.1rem; }
 .classes tr.all-row th, .classes tr.all-row td { border-top: 2px solid var(--line); }
 .classes { max-width: none; }
+
+/* --- schema v7: categories, references, set-aside figures --------------- */
+
+/* Categories and statuses as pills. Colour follows meaning only where there is
+   one to carry: a failure warns, a verified limitation reads as settled, and
+   everything neutral stays in ink -- never a hue per category. */
+.pill.neutral { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+.pill.muted { background: none; color: var(--ink-soft); border: 1px dashed var(--line); }
+.pills { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.findings { margin: -0.4rem 0 1rem; }
+.chips .pills { margin-left: 0.2rem; }
+
+/* A figure with verified base R limitations set aside: marked, never silent. */
+.sa { font-size: 0.8em; color: var(--ink-soft); cursor: help; }
+.sa-line { font-size: 0.72rem; color: var(--ink-soft); white-space: nowrap; }
+
+.small { font-size: 0.78rem; }
+td.small { max-width: 18rem; }
+div.small { margin-top: 0.1rem; }
+ul.facts { margin: -0.6rem 0 1.1rem; padding-left: 1.2rem; font-size: 0.86rem; color: var(--ink-soft); max-width: 52rem; }
+ul.facts strong { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+
+.vblock + .vblock { margin-top: 1.1rem; padding-top: 0.9rem; border-top: 1px solid var(--line); }
+.vblock h3 { font-size: 0.92rem; margin: 0 0 0.6rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.fold.inner { margin-top: 0.6rem; }
+.panel dl.stats { margin: 0.4rem 0 0.8rem; }
+
+table.grid td.wrap { white-space: normal; min-width: 10rem; max-width: 22rem; overflow-wrap: anywhere; }
+/* A jump to a panel lands below the sticky header, not under it. */
+section.panel { scroll-margin-top: 4.5rem; }

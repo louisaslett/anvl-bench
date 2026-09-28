@@ -213,6 +213,12 @@ squeue --me
 sacct -j <jobid> -X --format=JobID,JobName,State,Elapsed,TotalCPU
 ```
 
+After the run, keep a record of runtime:
+
+```
+sacct -j <jobid> -X --format=JobID,JobName,State,Elapsed,TotalCPU > ~/anvl-sweeps/job-<jobid>-timing.txt
+```
+
 ## If you later want the CUDA column
 
 This image is CPU-only by choice. A GPU variant needs `install_pjrt(cuda =

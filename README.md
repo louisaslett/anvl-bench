@@ -13,32 +13,46 @@ presents their results.
 > reference these sweeps compare against, not an oracle, and in places it is the
 > weaker implementation. The site is worded accordingly.
 
-## Input classes
+## What the site shows
 
-Relative error is the right measure only for ordinary inputs. Every result is
-therefore split by the class of its **input**, using `categories.parquet`
-(written by the harness's `export`):
+The site reads an artifact exported by the harness (schema version 7 or
+later; an older one is refused with a message, rather than mislabelled). Every
+classification is the harness's own, and `js/model.js` ports its
+`result_state()` so a page and `run.R status` can never disagree.
+
+**Input classes.** Relative error is the right measure only for ordinary
+inputs, so every result is split by the class of its input
+(`categories.parquet`):
 
 | class | inputs | what should happen |
 | --- | --- | --- |
-| normal | finite, not subnormal, inside the support | a small relative error |
-| zero & subnormal | exponent field 0 | behave as ±0 — XLA flushes subnormals on entry |
-| outside the support | finite, wholly off the support (quantiles only) | match base R exactly |
+| normal | finite, not subnormal, inside the valid domain | a small relative error |
+| ±0 | the sweep's zero samples (f32; the f64 sweep essentially never lands on ±0) | checked like any input |
+| subnormal | exponent field 0, zero excluded | the result at ±0: XLA flushes subnormals on entry |
+| outside the domain | finite, wholly outside the valid input domain | NaN by specification |
 | ±∞ & NaN | the top exponent field | match base R exactly |
 
-The overview and each function's page show accuracy for **normal inputs**, plus
-a *special* column counting inputs outside the support or ±∞/NaN whose result
-differs from base R. A result page shows every class, and shades the zero &
-subnormal and out-of-support parts of the binade chart.
+The headline figure everywhere is the worst relative error for **normal
+inputs with normal outputs** — where base R's value is a normal float too, so
+a small relative error is the right expectation. The distribution's support is
+shown, and excuses nothing; the chart shades what lies outside the valid
+*domain*.
 
-`↓0` marks a worst case where the result is ±0 and base R's value is subnormal —
-an output this backend cannot represent. A zero where base R's value is a
-*normal* float is not marked: a representable result was lost there.
+**Findings.** Where there is no finite relative error, the harness gives each
+region and each exact point a tested cause and a category: *failure*,
+*domain boundary*, *backend limitation*, *undefined-domain convention*, or
+*verified base R limitation*. All are shown. Only the last two are set aside,
+and a figure with verified base R limitations set aside is always marked (†)
+with the figure against base R beside it — never in its place.
 
-This split is by input only, so an output that underflows from a normal input
-still counts as normal. A later version of the sweep will also classify outputs.
-An artifact exported before `categories.parquet` existed still opens, showing
-all-input figures with a note saying so.
+**Exact points** (±0, ±∞, NaN, extremes, ±½, ±1, domain and support edges,
+anvl's branch points, and their neighbours) are listed on each result page,
+apart from the sweep's counts. **Disputes with base R** show every candidate
+with all three values and both distances. **Reference validation** shows, for
+each reference a result depends on, the latest validation against 256-bit
+MPFR: its status (the harness's, failing closed), worst error against the
+declared bound, how it was sampled, and its worst samples. One validation
+serves an anvl result and its JAX twin, which share a reference.
 
 ## Comparing with JAX
 
@@ -110,8 +124,9 @@ unpacked into:
 ```
 darwin-arm64-cpu.zip
   manifest.json
-  runs.parquet  summary.parquet  detail.parquet
-  bands.parquet  hist.parquet  ranges.parquet
+  runs.parquet  summary.parquet  categories.parquet  detail.parquet
+  bands.parquet  hist.parquet  ranges.parquet  kinds.parquet
+  points.parquet  disputes.parquet  validations.parquet  validation_samples.parquet
 ```
 
 Note the files sit at the zip's **root**, not inside a folder. To pack an export
@@ -177,7 +192,8 @@ Generate an artifact from the sweep harness:
 ```bash
 # from the anvl checkout carrying the sweep harness
 cd <anvl>/benchmarks/api-distributions
-Rscript run.R run --depth smoke --jobs 8
+Rscript run.R run --depth smoke --jobs 8 --backends anvl,jax
+Rscript run.R validate-refs          # needs Rmpfr; before export, or nothing is validated
 Rscript run.R export --out <anvl-bench>/data
 ```
 
@@ -210,6 +226,7 @@ js/hyparquet.js         the pinned dependency, imported in one place
 js/fmt.js               formatting, including the values JSON cannot carry
 js/source.js            where bytes come from: deployed URL, or local files
 js/store.js             what to read and how little of it
+js/model.js             result state, classes, categories: the harness's rules
 js/chart.js             hand-written SVG; no charting library
 js/app.js               router and views
 tools/serve.mjs         range-capable dev server
