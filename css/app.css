@@ -427,3 +427,26 @@ button.repro:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { background: var(--danger); color: #fff; }
+
+/* Explanations and controls remain readable with full labels. */
+.local-results summary { cursor: pointer; color: var(--accent); }
+.local-results[open] { flex-basis: 100%; }
+.local-results .note { margin: 0.5rem 0; }
+.filters { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; margin-bottom: 0.75rem; }
+.tiles { grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
+.tile-row { grid-template-columns: 2.4rem minmax(4rem, 1fr) 4.5rem 4.5rem; }
+.tile-head { font-size: 0.78rem; }
+.legend, .note { font-size: 0.9rem; }
+table.grid th { white-space: normal; min-width: 6rem; }
+.pills { min-width: 12rem; }
+.pill { white-space: normal; }
+.sa-line { white-space: normal; min-width: 10rem; }
+.configuration-table td:first-child, .configuration-table thead tr:last-child th:first-child {
+  position: sticky; left: 0; z-index: 1; background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+@media (max-width: 600px) {
+  header { position: static; }
+  table.grid { font-size: 0.86rem; }
+  .filters .field { flex-wrap: wrap; }
+}

@@ -15,11 +15,11 @@ const el = (name, attrs = {}, kids = []) => {
 
 /** Behaviour drives colour; the bar's height carries the size of the error. */
 export const BEHAVIOUR = {
-  "all identical": { cls: "b-identical", label: "all identical" },
-  "identical + differ": { cls: "b-some", label: "identical + differ" },
-  "all differ": { cls: "b-differ", label: "all differ" },
-  "mixed, some non-finite": { cls: "b-nonfinite", label: "mixed, some non-finite" },
-  "no finite error": { cls: "b-none", label: "no finite error" },
+  "all identical": { cls: "b-identical", label: "All match the reference" },
+  "identical + differ": { cls: "b-some", label: "Some match; some differ" },
+  "all differ": { cls: "b-differ", label: "All differ from the reference" },
+  "mixed, some non-finite": { cls: "b-nonfinite", label: "Some errors are undefined or infinite" },
+  "no finite error": { cls: "b-none", label: "No finite relative errors" },
 };
 const behaviourClass = (b) => BEHAVIOUR[b]?.cls ?? "b-other";
 
@@ -158,7 +158,7 @@ export function binadeChart({ bands, view, onZoom, compare = null, domain = null
     viewBox: `0 0 ${W} ${H}`,
     class: "binade-svg",
     role: "img",
-    "aria-label": "worst relative error by binade",
+    "aria-label": "Maximum relative error across input ranges",
   });
 
   // y axis. Integer decades are too coarse when a whole sweep lives inside one
@@ -183,8 +183,8 @@ export function binadeChart({ bands, view, onZoom, compare = null, domain = null
   }
   svg.append(el("text", { class: "axis-title", x: 6, y: 12 },
     document.createTextNode(present.length
-      ? "worst relative error against base R"
-      : "no finite error anywhere in this result")));
+      ? "Maximum finite relative error against reference"
+      : "No finite relative errors recorded")));
 
   // Input classes, as backgrounds behind the bars (input_class() in the
   // harness): the ±0 column, the subnormals of binade 0, and bands wholly
@@ -239,10 +239,10 @@ export function binadeChart({ bands, view, onZoom, compare = null, domain = null
       ` \u2014 inputs: ${inputsOf(b)}`;
     const tip =
       `${spanTxt}\n${wb.sign < 0 ? MINUS : "+"} ${num(Math.abs(wb.x_from))} \u2026 ${num(Math.abs(wb.x_to))}\n` +
-      `anvl worst rel err ${b.err === null ? "none" : num(10 ** b.err, 3)}` +
-      ` (${b.behaviour ?? "several behaviours"})` +
+      `anvl maximum relative error ${b.err === null ? "not available" : num(10 ** b.err, 3)}` +
+      ` (${BEHAVIOUR[b.behaviour]?.label ?? "Several comparison outcomes"})` +
       (b.cmp
-        ? `\n${compare.label} worst rel err ${!b.cmp.present ? "not swept" : b.cmp.err === null ? "none" : num(10 ** b.cmp.err, 3)}`
+        ? `\n${compare.label} maximum relative error ${!b.cmp.present ? "not swept" : b.cmp.err === null ? "not available" : num(10 ** b.cmp.err, 3)}`
         : "");
     rect.append(el("title", {}, document.createTextNode(tip)));
     g.append(rect);
@@ -370,7 +370,7 @@ export function binadeChart({ bands, view, onZoom, compare = null, domain = null
     for (const b of special) {
       const chip = document.createElement("span");
       chip.className = `chip ${behaviourClass(b.behaviour)}`;
-      chip.textContent = `sign ${b.sign < 0 ? MINUS : "+"}: ${b.behaviour}` +
+      chip.textContent = `sign ${b.sign < 0 ? MINUS : "+"}: ${BEHAVIOUR[b.behaviour]?.label ?? b.behaviour}` +
         (b.n_nonfinite ? `, ${b.n_nonfinite} non-finite` : "");
       s.append(chip);
     }
@@ -427,7 +427,7 @@ export function histChart(rows, compare = null) {
       y: (pad.t + ph - bh).toFixed(2), height: Math.max(bh, d.count > 0 ? 1 : 0).toFixed(2),
     });
     const tip =
-      `rel err 1e${String(d.decade).replace("-", MINUS)} – 1e${String(d.decade + 1).replace("-", MINUS)}\n` +
+      `Relative error 1e${String(d.decade).replace("-", MINUS)} – 1e${String(d.decade + 1).replace("-", MINUS)}\n` +
       `anvl: ${d.count.toLocaleString("en-US")} samples` +
       (compare ? `\n${compare.label}: ${(d.cmp ?? 0).toLocaleString("en-US")} samples` : "");
     rect.append(el("title", {}, document.createTextNode(tip)));

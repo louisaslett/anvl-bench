@@ -63,6 +63,8 @@ const table = (headers, rows, groups = null) =>
 /** How a backend is named on screen. */
 const backendLabel = (b) => ({ anvl: "anvl", jax: "JAX" })[b] ?? b;
 
+const referenceLabel = (r) => r.kind === "grad" ? "analytic gradient reference" : "base R";
+
 const pill = (cls, text, title = null) => h(`span.pill.${cls}`, { title }, text);
 
 /** A link to a panel further down the page. Not an href: the hash is the
@@ -106,9 +108,9 @@ async function copyText(text) {
 /** What the site recorded for one input of a result, labelled for a snippet. */
 const recOf = (res, value, reference, rel = null, ulp = null, extra = []) => [
   [backendLabel(res.backend), value],
-  [res.kind === "grad" ? "reference" : "base R", reference],
-  ["rel err", rel],
-  ["ulp err", ulp],
+  [referenceLabel(res), reference],
+  ["Relative error", rel],
+  ["Error (ULP)", ulp],
   ...extra,
 ];
 
@@ -189,12 +191,12 @@ function renderHeader() {
 
   if (app.deployed.length > 1) {
     const sel = h("select", {
-      "aria-label": "deployed artifact",
+      "aria-label": "Results dataset",
       onchange: async (e) => { await load(urlSource(e.target.value)); route(); },
     }, app.deployed.map((a) =>
       h("option", { value: a.dir, selected: app.store?.source?.origin === `${a.dir}/` },
         a.label ?? a.id)));
-    kids.push(h("label.field", {}, "Artifact ", sel));
+    kids.push(h("label.field", {}, "Results dataset ", sel));
   }
 
   const picker = h("input", {
@@ -212,16 +214,15 @@ function renderHeader() {
       }
     },
   });
-  kids.push(h("label.field", {},
-    "Open a local artifact ", picker,
-    h("span.hint", { title: "Release asset bytes cannot be fetched by a browser, so a version that is not deployed has to be downloaded first and opened from disk." }, "?")));
+  kids.push(h("details.local-results", {}, h("summary", {}, "Open downloaded results"),
+    h("p.note", {}, "Download and extract a results archive, then select manifest.json and all Parquet files together."),
+    h("label.field", {}, "Results files ", picker)));
 
   if (m) {
     kids.push(h("div.source-meta", {},
       h("span.tag", {}, m.platforms?.join(", ") ?? "?"),
       h("span.tag", {}, `anvl ${m.anvl_version?.join(", ") ?? "?"}`),
-      h("span.tag", {}, `${m.depths?.join(", ") ?? "?"} depth`),
-      h("span.muted", {}, `· ${app.store.source.origin}`)));
+      h("span.tag", {}, `Test coverage: ${m.depths?.join(", ") ?? "unknown"}`)));
   }
   put(bar, ...kids);
 }
@@ -280,27 +281,32 @@ function aggregate(rows) {
 /** The findings of one result, as a row of pills: every category shown. */
 function findingPills(r) {
   const out = [];
-  const nf = (r.n_runs_unclassified ?? 0) + (r.n_points_failure ?? 0);
-  if (nf) out.push(catPill("failure", `${nf} failure${nf === 1 ? "" : "s"}`));
+  const regions = r.n_runs_unclassified ?? 0;
+  const points = r.n_points_failure ?? 0;
+  if (regions || points) out.push(catPill("failure", "Unexplained: " + [regions ? `${regions} region${regions === 1 ? "" : "s"}` : null, points ? `${points} test point${points === 1 ? "" : "s"}` : null].filter(Boolean).join("; ")));
   const nb = (r.n_regions_boundary ?? 0) + (r.n_points_boundary ?? 0);
-  if (nb) out.push(catPill("boundary", `${nb} boundary`));
+  if (nb) out.push(catPill("boundary", `${nb} boundary findings`));
   const nl = (r.n_regions_backend ?? 0) + (r.n_points_backend ?? 0);
-  if (nl) out.push(catPill("backend_limitation", `${nl} backend`));
+  if (nl) out.push(catPill("backend_limitation", `${nl} findings caused by backend limitations`));
   const nc = (r.n_regions_domain ?? 0) + (r.n_points_domain ?? 0);
-  if (nc) out.push(catPill("undefined_domain", `${nc} convention${nc === 1 ? "" : "s"}`));
+  if (nc) out.push(catPill("undefined_domain", `${nc} undefined-domain findings`));
   const st = state(r);
   if (st.reference) out.push(catPill("reference_limitation", "verified base R limitation"));
-  if (st.candidates) out.push(pill("neutral", "base R disputed?", "candidate base R disputes whose stable reference is not validated; nothing is excluded"));
-  if (!out.length) out.push(pill("ok", st.identical ? "bit-identical" : "no findings"));
+  if (st.candidates) out.push(pill("neutral", "Possible base R error — unverified", "candidate base R disputes whose stable reference is not validated; nothing is excluded"));
+  if (!out.length) out.push(pill("ok", st.identical ? "bit-identical" : "No classified findings"));
   return h("span.pills", {}, out);
 }
 
 /** A result's references, by their validation status. */
-function refPills(r) {
+function refPills(r, plain = false) {
   const out = [];
-  if (r.ref_stable_status) out.push(statusPill(r.ref_stable_status, "stable ref "));
-  if (r.ref_grad_status) out.push(statusPill(r.ref_grad_status, "reference "));
-  return out.length ? h("span.pills", {}, out) : h("span.muted", {}, "base R");
+  const label = (status, prefix) => plain
+    ? h("div.muted", {}, prefix, REF_STATUS[status]?.label ?? status)
+    : statusPill(status, prefix);
+  if (r.ref_stable_status) out.push(label(r.ref_stable_status, "Stable reference: "));
+  if (r.ref_grad_status) out.push(label(r.ref_grad_status, "Gradient reference: "));
+  if (plain) return out.length ? out : h("span.muted", {}, referenceLabel(r));
+  return out.length ? h("span.pills", {}, out) : h("span.muted", {}, referenceLabel(r));
 }
 
 // --- overview ----------------------------------------------------------
@@ -312,17 +318,18 @@ function renderOverview() {
 
   const out = [h("h1", {}, "Accuracy of anvl's distribution functions")];
 
-  out.push(h("p.lede", {},
-    `Every function is swept against base R over float bit patterns: exhaustively in f32, ` +
-    `and one sample per 2`, h("sup", {}, "32"), `-block in f64, with a fixed set of exact points beside the sweep. `,
-    int(all.samples), ` samples across `, int(all.n), ` results.`));
+  out.push(h("p.lede", {}, "Explore numerical agreement for anvl’s distribution functions and gradients. Choose a function below to inspect its results and compare with JAX where available."));
+  out.push(h("p.note", {}, "Function values are compared with base R; gradients are compared with analytic gradient references. Each test configuration specifies the precision, parameters, options and output."));
+  out.push(h("details.fold", {}, h("summary", {}, "Test coverage and terminology"),
+    h("p.note", {}, "At full coverage, the tests examine every 32-bit floating-point bit pattern (f32), and sample one pattern from each block of 2³² patterns at 64-bit precision (f64). Shorter runs use fewer samples; the current coverage is shown in the header. Special inputs, including zero, infinities and domain boundaries, are tested separately. This dataset contains ", int(all.samples), " samples across ", int(all.n), " configurations."),
+    h("p.note", {}, "Subnormal numbers are very small floating-point values close to zero. ULP (unit in the last place) measures error using the spacing of representable numbers. A stable reference is an additional numerical implementation checked against high-precision MPFR calculations.")));
   if (s.comparators.length) {
     const cmp = backendLabel(s.comparators[0]);
     const nTwin = s.summary.filter((r) => s.twin(r)).length;
     out.push(h("p.lede", {},
-      `${cmp} is swept alongside as a comparator, against the same base R reference and on the same inputs. `,
+      `${cmp} is swept alongside as a comparator, against the same reference and on the same inputs. `,
       `${nTwin} of ${all.n} anvl results have a ${cmp} equivalent; the rest are variants ${cmp} does not offer. `,
-      `Every figure on this page is anvl's own — the comparison is on each function's page and each result's page.`));
+      `The overview shows anvl’s results. Open a function or result for the JAX comparison.`));
   }
 
   // The headline: failures -- no finite error on valid inputs, for no tested
@@ -333,19 +340,19 @@ function renderOverview() {
     .sort((a, b) => b.n - a.n);
   out.push(h(`div.callout.${all.failing ? "warn" : "ok"}`, {},
     h("strong", {}, all.failing
-      ? `${all.failing} of ${all.n} results fail somewhere: no finite error on valid inputs, and no tested cause`
-      : "No result fails anywhere on valid inputs"),
+      ? `${all.failing} of ${all.n} test configurations contain unexplained disagreements`
+      : "No unexplained failures were found among the tested inputs"),
     all.failing
-      ? h("p", {}, "Concentrated in ", bySpec.map((d, i) =>
+      ? h("p", {}, "These comparisons have undefined or infinite relative error and are not explained by a recognised boundary, backend or reference limitation, or an undefined-domain convention. Affected functions: ", bySpec.map((d, i) =>
           [i ? ", " : "", h("a", { href: specHref(d.spec) }, `${d.spec} (${d.n})`)]), ". ",
-          h("span.muted", {}, "A disagreement is not by itself a defect in anvl — base R is the reference here, not the truth, and is sometimes the weaker implementation."))
+          h("span.muted", {}, "Further analysis is needed to determine which implementation is more accurate."))
       : null,
-    h("p", {}, "Beside that, and each shown in full on the result pages: ",
+    h("p", {}, "Other findings (a configuration may appear in more than one category): ",
       [
         [all.boundary, "boundary", "with behaviour at a domain endpoint"],
         [all.backend, "backend_limitation", "with backend limitations (subnormal inputs flushed to zero)"],
-        [all.reference, "reference_limitation", "with verified base R limitations, set aside"],
-        [all.conventions, "undefined_domain", "with undefined-domain conventions, set aside"],
+        [all.reference, "reference_limitation", "with verified base R limitations"],
+        [all.conventions, "undefined_domain", "with differences in undefined-domain conventions"],
       ].filter(([k]) => k).map(([k, cat, what], i) => [i ? "; " : "", catPill(cat, String(k)), ` ${what}`]),
       all.boundary + all.backend + all.reference + all.conventions ? "." : "none.")));
 
@@ -365,8 +372,8 @@ function renderOverview() {
   out.push(h(`div.callout.${refBad ? "warn" : "ok"}`, {},
     h("strong", {}, refBad
       ? "Not every reference is validated"
-      : "Every reference is validated against high precision"),
-    h("p", {}, "Values are scored against base R. Gradients are scored against analytic references written for this benchmark, and a base R disagreement is only set aside against a stable reference — each checked against 256-bit MPFR on the exact inputs and parameters the sweep used. A failed or unchecked stable reference sets nothing aside."),
+      : "All recorded auxiliary references passed high-precision validation"),
+    h("p", {}, "Analytic gradient references and additional stable references are checked against 256-bit MPFR calculations. Only a validated stable reference can support excluding a verified base R limitation from adjusted error statistics."),
     refLine("stable", "stable references (base R disputes)"),
     refLine("gradient", "gradient references")));
 
@@ -378,9 +385,9 @@ function renderOverview() {
     const tile = h("a.tile", { href: specHref(spec) }, h("h2", {}, spec));
     const body = h("div.tile-body", {},
       h("div.tile-row.tile-head", {},
-        h("span", {}), h("span.r", { title: "worst relative error against base R: normal inputs with normal outputs" }, "worst"),
-        h("span.r", { title: "normal-input samples bit-identical to base R" }, "identical"),
-        h("span", { title: "results that fail somewhere" }, "failing")));
+        h("span", {}), h("span.r", { title: "Maximum finite relative error for normal inputs and outputs" }, "Max. error"),
+        h("span.r", { title: "Normal-input samples matching the reference; signed zeros count as equal" }, "Match %"),
+        h("span", { title: "Configurations with unexplained disagreements" }, "Flagged")));
     for (const dt of dtypes) {
       const a = aggregate(rows.filter((r) => r.dtype === dt));
       if (!a.n) continue;
@@ -389,18 +396,19 @@ function renderOverview() {
         h("span.metric", {}, num(a.worst, 3), a.setAside ? [" ", h("span.sa", { title: "excluding verified base R limitations; the figures against base R are on the function page" }, "†")] : null),
         h("span.metric.muted", {}, pct(a.normalFrac)),
         a.failing
-          ? h("span.pill.warn", { title: "results that fail somewhere" }, `${a.failing}`)
-          : h("span.pill.ok", { title: "no failures" }, "✓")));
+          ? h("span.pill.warn", { title: "Configurations with unexplained disagreements" }, `${a.failing}`)
+          : h("span.pill.ok", { title: "No unexplained failures found" }, "✓")));
     }
     tile.append(body);
     grid.append(tile);
   }
-  out.push(grid);
-  out.push(h("p.legend", {},
-    h("strong", {}, "Worst"), ` is the worst relative error against base R over `, h("strong", {}, "normal inputs with normal outputs"),
-    ` — finite, not subnormal, inside the valid domain, where base R's value is a normal float too: where a small relative error is the right expectation. `,
-    h("strong", {}, "Identical"), ` is the share of normal-input samples bit-identical to base R. `,
-    h("span.sa", {}, "†"), ` marks a figure with verified base R limitations set aside; the figure against base R is on the function page.`));
+  out.splice(3, 0, grid);
+  const metricLegend = h("p.legend", {},
+    h("strong", {}, "Max. error"), ` is the maximum finite relative error against the relevant reference over `, h("strong", {}, "normal inputs with normal outputs"),
+    ` within the valid domain. Here “normal” describes floating-point representation, not the normal distribution. `,
+    h("strong", {}, "Match %"), ` is the percentage of normal-input samples matching the reference. Signed-zero differences are reported separately on result pages. `,
+    h("span.sa", {}, "†"), ` marks an error statistic that excludes verified base R limitations. The unadjusted statistic is available on the result page. Flagged counts configurations containing unexplained disagreements, rather than individual samples.`);
+  out.splice(4, 0, metricLegend);
 
   out.push(renderRuns());
   put(main(), ...out);
@@ -450,6 +458,7 @@ const SORTS = {
   name: (a, b) => a.cell_id.localeCompare(b.cell_id) || a.output.localeCompare(b.output),
 };
 let specSort = "failing";
+const specFilters = { precision: "all", kind: "all", findings: "all" };
 
 function renderSpec(spec) {
   const s = app.store;
@@ -477,20 +486,27 @@ function renderSpec(spec) {
   const zeroCell = (r) => {
     const z = classesOf(r).zero;
     // The f64 sweep essentially never samples ±0; the exact points always do.
-    if (!z) return h("span.muted", { title: "not among this sweep's samples; ±0 is checked among the exact points" }, "points");
-    if (z.n_identical < z.n) return pill("warn", `${z.n - z.n_identical} ≠`, "±0 samples that differ from base R");
+    if (!z) return h("span.muted", { title: "not among this sweep's samples; ±0 is checked among the exact points" }, "Tested separately");
+    if (z.n_identical < z.n) return pill("warn", `${z.n - z.n_identical} samples differ`, "Zero inputs that differ from the reference");
     return z.n_zero_sign
-      ? pill("neutral", "sign", "equal to base R, but a zero of the opposite sign")
-      : pill("ok", "✓", "bit-identical to base R");
+      ? pill("neutral", "sign", "Matches the reference value, but the sign of zero differs")
+      : pill("ok", "✓", "Matches the reference exactly");
   };
   const pointsCell = (r) => {
     if (!r.n_points) return h("span.muted", {}, "—");
     const bad = r.n_points - r.n_points_identical;
-    return h("span", { title: `${r.n_points_identical} of ${r.n_points} exact points bit-identical to base R, down to the sign of zero` },
-      bad ? `${r.n_points_identical}/${r.n_points}` : pill("ok", `✓ ${r.n_points}`));
+    return h("span", { title: `${r.n_points_identical} of ${r.n_points} special test points match the reference, including the sign of zero` },
+      bad ? `${r.n_points_identical} of ${r.n_points} match` : pill("ok", `✓ ${r.n_points}`));
   };
 
-  const sorted = [...rows].sort(SORTS[specSort] ?? SORTS.failing);
+  const filtered = rows.filter((r) =>
+    (specFilters.precision === "all" || r.dtype === specFilters.precision) &&
+    (specFilters.kind === "all" || r.kind === specFilters.kind) &&
+    (specFilters.findings === "all" || state(r).failing));
+  const sorted = [...filtered].sort(SORTS[specSort] ?? SORTS.failing);
+  const filter = (key, label, choices) => h("label.field", {}, label, h("select", {
+    onchange: (e) => { specFilters[key] = e.target.value; renderSpec(spec); },
+  }, choices.map(([value, text]) => h("option", { value, selected: specFilters[key] === value }, text))));
   const body = sorted.map((r) => {
     const st = state(r);
     const c = classesOf(r);
@@ -506,13 +522,13 @@ function renderSpec(spec) {
       h("td.r", {}, pct(frac(c.subnormal))),
       h("td.r", {}, pointsCell(r)),
       h("td.grp", {}, findingPills(r)),
-      h("td", {}, refPills(r)),
+      h("td", {}, refPills(r, true)),
       cmpCells(r));
   });
 
   const sortSel = h("select", { onchange: (e) => { specSort = e.target.value; renderSpec(spec); } },
-    [["failing", "failures first"], ["worst", "worst relative error (normal in, normal out)"],
-     ["exact", "least bit-identical (normal inputs)"], ["name", "name"]].map(([v, l]) =>
+    [["failing", "Unexplained disagreements first"], ["worst", "Maximum relative error (normal inputs and outputs)"],
+     ["exact", "Lowest match rate (normal inputs)"], ["name", "name"]].map(([v, l]) =>
       h("option", { value: v, selected: v === specSort }, l)));
 
   const groups = [
@@ -528,29 +544,36 @@ function renderSpec(spec) {
     h("h1", {}, spec),
     h("p.lede", {}, `${a.n} results, ${int(a.samples)} samples in all. `,
       a.failing
-        ? h("strong", {}, `${a.failing} fail somewhere.`)
-        : "None fails anywhere on valid inputs."),
-    h("label.field", {}, "Sort by ", sortSel),
+        ? h("strong", {}, `${a.failing} contain unexplained disagreements.`)
+        : "No unexplained failures were found among the tested inputs."),
+    h("p.note", {}, "Values use base R as the reference; gradients use an analytic gradient reference. Error columns show the maximum finite relative error. Undefined or infinite errors are listed separately in Findings. “Normal” refers to floating-point representation. Signed-zero differences are reported separately."),
+    h("div.filters", {},
+      filter("precision", "Precision ", [["all", "All precisions"], ["f32", "32-bit (f32)"], ["f64", "64-bit (f64)"]]),
+      filter("kind", "Output type ", [["all", "Values and gradients"], ["value", "Values"], ["grad", "Gradients"]]),
+      filter("findings", "Findings ", [["all", "All configurations"], ["unexplained", "Unexplained disagreements"]]),
+      h("label.field", {}, "Sort by ", sortSel)),
+    h("p.note", { role: "status" }, `Showing ${filtered.length} of ${rows.length} configurations.`, filtered.length ? " Scroll horizontally to see all comparison columns." : " Choose different filters to see results."),
     table([
-      { label: "cell", hint: "precision, value or gradient, parameter set" },
-      "flags",
+      { label: "Configuration", hint: "precision, value or gradient, parameter set" },
+      "Options",
       { label: "output", hint: "value, or the argument differentiated" },
-      { label: "worst, normal out", align: "r", cls: "grp", hint: "worst relative error where base R's value is a normal float too" },
-      { label: "worst, any out", align: "r", hint: "worst relative error over every output, subnormal and zero outputs included" },
-      { label: "bit-identical", align: "r" },
+      { label: "Max. relative error: normal outputs", align: "r", cls: "grp", hint: "worst relative error where the reference value is a normal float too" },
+      { label: "Max. relative error: all outputs", align: "r", hint: "worst relative error over every output, subnormal and zero outputs included" },
+      { label: "Matches reference (%)", align: "r" },
       { label: "±0", cls: "grp", hint: "the sweep's ±0 samples: bit-identical, down to the sign?" },
-      { label: "subnormal", align: "r", hint: "subnormal inputs bit-identical to base R" },
-      { label: "exact points", align: "r", hint: "±0, ±∞, NaN, extremes, ±½, ±1, domain and support edges, branch points, and their neighbours" },
+      { label: "Subnormal inputs matching (%)", align: "r", hint: "Percentage of subnormal inputs matching the reference" },
+      { label: "Special test points matching", align: "r", hint: "±0, ±∞, NaN, extremes, ±½, ±1, domain and support edges, branch points, and their neighbours" },
       { label: "findings", cls: "grp", hint: "no-finite-error regions and exact points, by category" },
       { label: "reference", hint: "what this result is scored against, and whether that reference is validated" },
       ...(cmp ? [
-        { label: "worst, normal out", align: "r", cls: "cmp", hint: `${backendLabel(cmp)}, on the same inputs, against the same base R reference` },
-        { label: "bit-identical", align: "r" },
+        { label: "Max. relative error: normal outputs", align: "r", cls: "cmp", hint: `${backendLabel(cmp)}, on the same inputs, against the same reference` },
+        { label: "Matches reference (%)", align: "r" },
         { label: "findings" },
       ] : []),
     ], body, groups),
     h("p.legend", {}, h("span.sa", {}, "†"),
-      " marks a figure with verified base R limitations set aside; hover it for the figure against base R, which the result page shows in full."));
+      " marks an error statistic excluding verified base R limitations. Open the result to see both adjusted and unadjusted values."));
+  main().querySelector(".table-wrap")?.classList.add("configuration-table");
 }
 
 // --- one result --------------------------------------------------------
@@ -586,7 +609,7 @@ async function renderCell(cellId, output, zoom) {
     if (!c || c[field] === undefined || c[field] === null) return "—";
     const excl = verified ? c[`${field}_excl`] : null;
     if (typeof excl !== "number" || excl === c[field]) return num(c[field], 3);
-    return [num(c[field], 3), h("div.sa-line", { title: "with verified base R limitations set aside" }, `${num(excl, 3)} set aside`)];
+    return [num(c[field], 3), h("div.sa-line", { title: "excluding verified base R limitations" }, `${num(excl, 3)} excluding verified base R limitations`)];
   };
   const classRow = (k, c, tc) => h("tr", { class: k === "all" ? "all-row" : null },
     h("th.cls", { scope: "row" }, k === "all" ? "All inputs" : CLASSES[k].long,
@@ -609,11 +632,11 @@ async function renderCell(cellId, output, zoom) {
   });
   const classTable = h("div.compare.classes", {}, table([
     { label: "input, and what should happen" }, { label: "samples", align: "r" },
-    { label: "bit-identical", align: "r" },
+    { label: "Matches reference (%)", align: "r" },
     { label: "rounded", align: "r", hint: "correctly rounded to the result's precision without being identical: the best the precision allows, though its relative error is not zero" },
-    { label: "worst, normal out", align: "r", hint: "worst relative error where base R's value is a normal float" },
-    { label: "worst, any out", align: "r" }, { label: "worst at x", align: "r" },
-    ...(t ? [{ label: "bit-identical", align: "r", cls: "cmp" }, { label: "worst, normal out", align: "r" }] : []),
+    { label: "Max. relative error: normal outputs", align: "r", hint: "worst relative error where the reference value is a normal float" },
+    { label: "Max. relative error: all outputs", align: "r" }, { label: "worst at x", align: "r" },
+    ...(t ? [{ label: "Matches reference (%)", align: "r", cls: "cmp" }, { label: "Max. relative error: normal outputs", align: "r" }] : []),
   ], [
     ...Object.keys(CLASSES).filter((k) => mine[k]).map((k) => classRow(k, mine[k], theirs?.[k])),
     classRow("all", asClass(r), asClass(t)),
@@ -622,8 +645,8 @@ async function renderCell(cellId, output, zoom) {
   // Facts that sit across the classes, each kept visible.
   const facts = [
     [r.n_zero_sign, "samples return a zero of the opposite sign (+0 against −0): counted as identical above, and shown here"],
-    [r.n_flushed, "subnormal inputs differ from base R because the backend flushed them to ±0, whose own result is right"],
-    [r.n_flushed_zero_error, "subnormal inputs were flushed to a ±0 whose own result is wrong: they inherit its error"],
+    [r.n_flushed, "subnormal inputs differ from the reference because the backend converted them to ±0 and returned the expected result for zero"],
+    [r.n_flushed_zero_error, "subnormal inputs were converted to ±0, and the result for zero also differs from the reference"],
   ].filter(([n]) => n > 0);
   const factList = facts.length
     ? h("ul.facts", {}, facts.map(([n, what]) => h("li", {}, h("strong", {}, int(n)), " ", what, ".")))
@@ -632,12 +655,12 @@ async function renderCell(cellId, output, zoom) {
   const STATS = [
     ["worst relative error", (x) => num(x.worst_rel_err)],
     ["worst ulp error", (x) => num(x.worst_ulp_err), "the worst ulp error over every sample, which need not be the worst relative error's sample"],
-    ["bit-identical to base R", (x) => pct(x.n_exact / x.n_samples)],
+    ["Matches reference (%)", (x) => pct(x.n_exact / x.n_samples)],
     ["worst relative error at x", (x) => [
       repro(num(x.worst_x), x, x.worst_x, x.worst_bits, "worst relative error", recOf(x, x.worst_value, x.worst_reference, x.worst_rel_err)), " ",
       repro(h("code.bits", {}, x.worst_bits ?? ""), x, x.worst_x, x.worst_bits, "worst relative error", recOf(x, x.worst_value, x.worst_reference, x.worst_rel_err))]],
-    ["its value there", (x) => num(x.worst_value)],
-    ["base R there", (x) => num(x.worst_reference)],
+    ["Computed value at this input", (x) => num(x.worst_value)],
+    ["Reference value at this input", (x) => num(x.worst_reference)],
     ["exact points: worst finite error", (x) => (x.worst_point_rel_err > 0 ? [num(x.worst_point_rel_err), " at ", h("code", {}, x.worst_point_label ?? "")] : "0")],
     ["samples", (x) => int(x.n_samples)],
   ];
@@ -654,31 +677,31 @@ async function renderCell(cellId, output, zoom) {
   const nFailP = r.n_points_failure ?? 0;
   if (st.failing) {
     callouts.push(h("div.callout.warn", {},
-      h("strong", {}, `${me} fails here: ${[nFailR ? `${nFailR} region${nFailR === 1 ? "" : "s"}` : null, nFailP ? `${nFailP} exact point${nFailP === 1 ? "" : "s"}` : null].filter(Boolean).join(" and ")} with no finite error on valid inputs, and no tested cause`),
-      h("p", {}, "Listed below, under ", jump("regions", "regions"), " and ", jump("points", "exact points"), ". ",
-        h("span.muted", {}, "Which side is closer to the true value is a separate question; base R is the reference, not an oracle."))));
+      h("strong", {}, `${me} has unexplained disagreements: ${[nFailR ? `${nFailR} region${nFailR === 1 ? "" : "s"}` : null, nFailP ? `${nFailP} special test point${nFailP === 1 ? "" : "s"}` : null].filter(Boolean).join(" and ")} with undefined or infinite relative error`),
+      h("p", {}, "Listed below, under ", jump("regions", "regions"), " and ", jump("points", "special test points"), ". ",
+        h("span.muted", {}, "These findings are not explained by a recognised limitation or an undefined-domain convention. Further analysis is needed to determine which implementation is more accurate."))));
   }
   if (st.reference) {
     callouts.push(h("div.callout", {},
-      h("strong", {}, "Verified base R limitations, set aside"),
-      h("p", {}, `${int(r.n_ref_candidate)} samples${r.n_points_ref_candidate ? ` and ${r.n_points_ref_candidate} exact points` : ""} where base R is off and ${me} is accurate, both against a stable reference that passed validation at high precision. `,
-        `Worst relative error against base R: ${num(r.worst_rel_err, 3)}; with these set aside: ${num(r.worst_rel_err_excl, 3)}. `,
+      h("strong", {}, "Verified base R limitations excluded from adjusted error statistics"),
+      h("p", {}, `${int(r.n_ref_candidate)} samples${r.n_points_ref_candidate ? ` and ${r.n_points_ref_candidate} exact points` : ""} where base R exceeds its error tolerance and ${me} meets its tolerance against a validated stable reference. `,
+        `Worst relative error against base R: ${num(r.worst_rel_err, 3)}; excluding these samples: ${num(r.worst_rel_err_excl, 3)}. `,
         jump("disputes", "The evidence"), " is below.")));
   } else if (st.candidates) {
     callouts.push(h("div.callout", {},
-      h("strong", {}, "Base R disputed, but nothing is set aside"),
+      h("strong", {}, "Possible base R errors remain included in the results"),
       h("p", {}, `${int(r.n_ref_candidate)} samples look like base R limitations against a stable reference, but that reference is ${REF_STATUS[r.ref_stable_status]?.label ?? r.ref_stable_status}, so they are counted against ${me} like any other disagreement. `,
         jump("disputes", "The candidates"), " are below.")));
   }
   if (r.ref_grad_status && r.ref_grad_status !== "validated") {
     callouts.push(h("div.callout.warn", {},
       h("strong", {}, `The gradient reference is ${REF_STATUS[r.ref_grad_status]?.label ?? r.ref_grad_status}`),
-      h("p", {}, "Every figure on this page is measured against it, and is only as good as it is. ",
+      h("p", {}, "Treat the gradient error statistics as provisional until the reference passes validation. ",
         jump("validation", "See its validation"), ".")));
   }
   if (t && tst.failing && !st.failing) {
     callouts.push(h("div.callout", {},
-      h("strong", {}, `${cmpLabel} fails here; ${me} does not`),
+      h("strong", {}, `${cmpLabel} has unexplained disagreements; none were found for ${me}`),
       h("p", {}, `${cmpLabel} has ${(t.n_runs_unclassified ?? 0) + (t.n_points_failure ?? 0)} failure(s) on this cell, listed below beside ${me}'s findings.`)));
   }
 
@@ -706,19 +729,21 @@ async function renderCell(cellId, output, zoom) {
       refPills(r)),
     h("div.findings", {}, findingPills(r)),
     ...callouts,
+    h("p.note", {}, "Reference: ", h("strong", {}, referenceLabel(r)), ". Error statistics describe finite relative errors; undefined or infinite errors appear separately in the findings. Matching percentages include those other comparisons. Signed zeros count as equal in sweep percentages and are reported separately."),
+    h("p.note", {}, "Select an underlined input to copy a reproduction script."),
     classTable,
     factList,
     h("details.fold", {}, h("summary", {}, "Worst case over all inputs: ulp error, the values there, and the exact points"), overall),
     noTwin,
   ];
 
-  const panel = (id, title) => h("section.panel", { id }, h("h2", {}, title), h("p.status", {}, "reading…"));
+  const panel = (id, title) => h("section.panel", { id }, h("h2", {}, title), h("p.status", {}, "Loading result details…"));
   const slots = {
     hist: panel("hist", "Distribution of relative error"),
-    bands: panel("bands", "Worst relative error by binade"),
+    bands: panel("bands", "Maximum relative error across input ranges"),
     detail: panel("detail", "Worst inputs"),
-    points: panel("points", "Exact points"),
-    ranges: panel("regions", "Regions with no finite error"),
+    points: panel("points", "Special test points"),
+    ranges: panel("regions", "Regions with undefined or infinite relative error"),
     disputes: r.ref_stable_id || r.ref_stable_status ? panel("disputes", "Disputes with base R") : null,
     validation: r.ref_stable_status || r.ref_grad_status ? panel("validation", "Reference validation") : null,
   };
@@ -798,7 +823,7 @@ async function renderCell(cellId, output, zoom) {
     const tabs = (panelId, draw1) => {
       if (!t) return null;
       const which = app.tab[panelId] ?? r.backend;
-      return h("div.seg", { role: "tablist", "aria-label": "whose" },
+      return h("div.seg", { role: "tablist", "aria-label": `${panelId === "points" ? "Special test points" : "Worst inputs"}: implementation` },
         [r.backend, cmp].map((b) => h("button", {
           role: "tab",
           "aria-selected": String(which === b),
@@ -830,7 +855,7 @@ async function renderCell(cellId, output, zoom) {
       return { n, same, worst };
     };
     const summary = (label, x) =>
-      h("span", {}, h("strong", {}, label), ` ${pct(x.n ? x.same / x.n : null)} bit-identical, worst rel err ${num(x.worst, 3)}`);
+      h("span", {}, h("strong", {}, label), ` ${pct(x.n ? x.same / x.n : null)} matching reference, maximum finite relative error ${num(x.worst, 3)}`);
     const rangeLine = v
       ? h("p.range-line", {},
         h("span", {}, `In this range, ${v[1] - v[0]} of ${columns.length} columns (`, span(), `), ${int(tally(bands).n)} samples: `),
@@ -840,11 +865,11 @@ async function renderCell(cellId, output, zoom) {
 
     put(slots.bands,
       h("div.panel-head", {},
-        h("h2", {}, "Worst relative error by binade"),
+        h("h2", {}, "Maximum relative error across input ranges"),
         v ? h("button.reset", { onclick: () => { location.hash = zoomHref(null); } }, "Reset view") : null),
-      h("p.note", {}, "The axis is the real line in bit-pattern order. Each bar is one binade — or each sign's ±0 — or, where they do not fit, the worst of several. ",
+      h("p.note", {}, "Inputs run from negative to positive. Bars group floating-point values into intervals between successive powers of two (binades), with separate groups for subnormal values and signed zeros. When space is limited, a bar shows the maximum across several groups. ",
         h("strong", {}, "Drag across the chart to zoom"), " — the worst inputs, exact points, regions and disputes below follow the range.",
-        t ? ` The line is ${cmpLabel}'s worst relative error over the same binades, against the same base R reference; it breaks where ${cmpLabel} was not swept and rests on the axis where it matches base R exactly.` : ""),
+        t ? ` The line is ${cmpLabel}'s worst relative error over the same binades, against the same reference; it breaks where ${cmpLabel} was not swept and rests on the axis where it matches the reference exactly.` : ""),
       chart.wrap ?? chart,
       rangeLine,
       h("div.chart-foot", {},
@@ -888,14 +913,14 @@ async function renderCell(cellId, output, zoom) {
         h("h2", {}, "Worst inputs"),
         tabs("detail", drawDetail),
         h("p.note", {},
-          v ? ["The 25 largest finite relative errors in the zoomed range, ", span(), "."]
-            : "The 25 largest finite relative errors across the whole sweep. Drag across the chart above to narrow to a range.",
-          t ? " Each backend's worst inputs are its own, so the two lists are generally at different x." : ""),
+          v ? ["Up to 25 recorded inputs with the largest finite relative errors in the selected range, ", span(), "."]
+            : "Up to 25 recorded inputs with the largest finite relative errors. Drag across the chart above to filter the recorded inputs by range.",
+          t ? " Each backend has its own recorded inputs, so the lists may show different input values." : ""),
         shown.length
           ? table([
             { label: "bits" }, { label: "x", align: "r" },
-            { label: backendLabel(which), align: "r" }, { label: "base R", align: "r" },
-            { label: "rel err", align: "r" }, { label: "ulp", align: "r" }, { label: "" },
+            { label: backendLabel(which), align: "r" }, { label: referenceLabel(res), align: "r" },
+            { label: "Relative error", align: "r" }, { label: "ulp", align: "r" }, { label: "" },
           ], shown.map((d) => h("tr", {},
             h("td", {}, dRepro(h("code.bits", {}, d.bits ?? ""), d)),
             h("td.r", {}, dRepro(num(d.x), d)),
@@ -905,8 +930,8 @@ async function renderCell(cellId, output, zoom) {
             h("td.r", {}, num(d.ulp_err, 3)),
             h("td", {}, [
               d.rounded ? pill("ok", "rounded", "correctly rounded to the result's precision: the best it allows") : null,
-              d.flushed ? pill("neutral", "flushed", "a subnormal input flushed to ±0, whose result is right") : null,
-              isUf(d) ? pill("neutral", "↓0", "an output of 0 where base R's value is subnormal at this precision") : null,
+              d.flushed ? pill("neutral", "Converted to zero", "The backend converted a subnormal input to zero and returned the expected result for zero") : null,
+              isUf(d) ? pill("neutral", "Underflow to zero", "The result is zero while the reference value is subnormal at this precision") : null,
             ]))))
           : h("p.muted", {}, v ? "No differing samples recorded in this range." : "No differing samples recorded here."),
       );
@@ -923,8 +948,8 @@ async function renderCell(cellId, output, zoom) {
       }
       if (p.zero_sign) return pill("neutral", "signed zero differs");
       if (p.rounded) return pill("ok", "correctly rounded");
-      if (p.ref_candidate) return catPill(st.verified ? "reference_limitation" : "boundary", st.verified ? "verified base R limitation" : "base R disputed?");
-      return h("span", {}, `rel err ${num(p.rel_err, 3)}`);
+      if (p.ref_candidate) return catPill(st.verified ? "reference_limitation" : "boundary", st.verified ? "verified base R limitation" : "Possible base R error — unverified");
+      return h("span", {}, `Relative error ${num(p.rel_err, 3)}`);
     };
     const drawPoints = () => {
       const which = whose("points");
@@ -940,21 +965,21 @@ async function renderCell(cellId, output, zoom) {
       const nameOf = (p) => String(p.label).split("+").filter(Boolean).join(" · ");
       const order = (p) => (p.failure ? (p.category === "failure" ? 0 : 1) : 2);
       put(slots.points,
-        h("h2", {}, "Exact points"),
+        h("h2", {}, "Special test points"),
         tabs("points", drawPoints),
         h("p.note", {}, "Checked beside every sweep, at inputs a sweep can miss: ±0, ±∞, NaN, the subnormal and normal extremes, ±½, ±1, the edges of the valid domain and the support, and ",
           r.backend === "anvl" ? "anvl's branch points" : "(for anvl) its branch points",
           " — each at this precision, with its two neighbours. Never added to the sweep's counts. ",
-          all.length ? `${all.filter((p) => p.identical && !p.zero_sign).length} of ${all.length} bit-identical to base R, down to the sign of zero.` : "",
+          all.length ? `${all.filter((p) => p.identical && !p.zero_sign).length} of ${all.length} test points match the reference, including the sign of zero.` : "",
           v ? [" Shown: points in ", span(), "."] : ""),
         signOnly.length
           ? h("p.note", { title: signOnly.map(nameOf).join("\n") },
             h("strong", {}, `${signOnly.length} point${signOnly.length === 1 ? "" : "s"}`),
-            ` return a zero of the opposite sign to base R's (${signOnly.slice(0, 3).map(nameOf).join("; ")}${signOnly.length > 3 ? "; …" : ""}). Equal by value, and listed apart from those that are not.`)
+            ` return a zero of the opposite sign to the reference (${signOnly.slice(0, 3).map(nameOf).join("; ")}${signOnly.length > 3 ? "; …" : ""}). Equal by value, and listed apart from those that are not.`)
           : null,
         bad.length
           ? table([{ label: "point" }, { label: "x", align: "r" }, { label: "bits" },
-            { label: backendLabel(which), align: "r" }, { label: "base R", align: "r" }, { label: "what" }],
+            { label: backendLabel(which), align: "r" }, { label: referenceLabel(res), align: "r" }, { label: "Finding" }],
           [...bad].sort((a, b) => order(a) - order(b) || (b.rel_err ?? 0) - (a.rel_err ?? 0)).map((p) =>
             h("tr", { class: p.failure && p.category === "failure" ? "row-warn" : null },
               h("td.wrap", { title: p.role }, h("code", {}, nameOf(p))),
@@ -999,9 +1024,8 @@ async function renderCell(cellId, output, zoom) {
       ];
     };
     put(slots.ranges,
-      h("h2", {}, "Regions with no finite error"),
-      h("p.note", {}, "Stretches of inputs where no finite relative error exists, each with a cause established by a test rather than read off where the inputs lie, and a category. ",
-        "Only undefined-domain conventions and verified base R limitations are set aside; every category is shown. ",
+      h("h2", {}, "Regions with undefined or infinite relative error"),
+      h("p.note", {}, "Input ranges where relative error is undefined or infinite. Each range shows the category and cause identified by the benchmark, or states that the cause is unknown. ",
         parts.dtype === "f64" ? "For f64 the bounds are those of the 2³² blocks the failing samples fell in; the sampled inputs are shown beneath them. " : "",
         v ? ["Shown: regions that reach into ", span(), ", at their full extent."] : ""),
       rsorted.length
@@ -1009,7 +1033,7 @@ async function renderCell(cellId, output, zoom) {
           ...(t ? [{ label: "backend" }] : []),
           { label: "from", align: "r" }, { label: "to", align: "r" },
           { label: "failing", align: "r", hint: "failing samples actually evaluated" },
-          { label: "category, cause" }, { label: "returned", hint: "what the two sides returned: value kind vs base R's kind, with counts" },
+          { label: "category, cause" }, { label: "returned", hint: "Types of values returned by the implementation and reference, with counts" },
           { label: "for example", hint: "one representative failing input" }],
           rsorted.map((x) => h("tr", { class: x.category === "failure" ? "row-warn" : null },
             t ? h("td", { class: x.be === cmp ? "cmp" : null }, backendLabel(x.be)) : null,
@@ -1034,23 +1058,25 @@ async function renderCell(cellId, output, zoom) {
       put(slots.disputes,
         h("h2", {}, "Disputes with base R"),
         h("p.note", {}, st.verified
-          ? h("strong", {}, "Verified base R limitations: the stable reference passed validation, so these are set aside. ")
-          : h("strong", {}, `Candidates only: the stable reference is ${REF_STATUS[r.ref_stable_status]?.label ?? r.ref_stable_status}, so nothing is set aside. `),
+          ? h("strong", {}, "Verified base R limitations: the stable reference passed validation, so adjusted error statistics exclude these samples. ")
+          : h("strong", {}, `Candidates only: the stable reference is ${REF_STATUS[r.ref_stable_status]?.label ?? r.ref_stable_status}, so these samples remain included in the reported results. `),
           r.ref_stable_note ? `Why: ${r.ref_stable_note}. ` : "",
-          "A sample is a candidate only when base R is off (|base R − s| beyond 4 ulp_f64 + B), anvl is accurate (|anvl − s| within 2 ulp at this precision + B) and anvl is no further from s — s the stable reference, B its declared error bound."),
+          "Candidates are inputs where base R exceeds its tolerance against the stable reference, while anvl stays within its tolerance and is at least as close to that reference."),
+        h("details.fold.inner", {}, h("summary", {}, "Candidate selection thresholds"),
+          h("p.note", {}, "Let s be the stable reference and B its declared error bound. A candidate must satisfy all three conditions: |base R − s| > 4 ULP at f64 precision + B; |anvl − s| ≤ 2 ULP at the tested precision + B; and |anvl − s| ≤ |base R − s|.")),
         h("dl.stats", {},
           h("div.stat", {}, h("dt", {}, "candidates"), h("dd", {}, int(r.n_ref_candidate))),
-          h("div.stat", {}, h("dt", {}, "of which no finite error"), h("dd", {}, int(r.n_ref_candidate_nonfinite))),
+          h("div.stat", {}, h("dt", {}, "Candidates with undefined or infinite relative error"), h("dd", {}, int(r.n_ref_candidate_nonfinite))),
           h("div.stat", { title: "anvl and base R return the same value, and both are beyond anvl's tolerance against the stable reference" },
-            h("dt", {}, "both off, and agreeing"), h("dd", {}, int(r.n_ref_shared))),
-          h("div.stat", {}, h("dt", {}, "worst rel err, all"), h("dd", {}, num(r.worst_rel_err, 3))),
-          h("div.stat", {}, h("dt", {}, st.verified ? "set aside" : "without candidates"), h("dd", {}, num(r.worst_rel_err_excl, 3)))),
+            h("dt", {}, "Both agree but exceed tolerance"), h("dd", {}, int(r.n_ref_shared))),
+          h("div.stat", {}, h("dt", {}, "Maximum relative error, all samples"), h("dd", {}, num(r.worst_rel_err, 3))),
+          h("div.stat", {}, h("dt", {}, st.verified ? "Maximum error excluding verified limitations" : "Maximum error excluding unverified candidates"), h("dd", {}, num(r.worst_rel_err_excl, 3)))),
         ex.length
           ? table([{ label: "kind" }, { label: "x", align: "r" }, { label: me, align: "r" }, { label: "base R", align: "r" },
             { label: "stable", align: "r" }, { label: `|${me} − s|`, align: "r" }, { label: "tolerance", align: "r" },
             { label: "|base R − s|", align: "r" }, { label: "tolerance", align: "r" }],
           ex.map((d) => h("tr", {},
-            h("td", {}, d.kind === "shared" ? pill("warn", "both off", "anvl and base R agree, and both are beyond anvl's tolerance") : pill("neutral", "candidate")),
+            h("td", {}, d.kind === "shared" ? pill("warn", "Both exceed tolerance", "anvl and base R agree, and both are beyond anvl's tolerance") : pill("neutral", "candidate")),
             h("td.r", {}, repro(num(d.x), r, d.x, d.bits, "dispute with base R",
               recOf(r, d.value, d.reference, null, null, [["stable ref", d.stable]]))),
             h("td.r", {}, num(d.value, 6)), h("td.r", {}, num(d.reference, 6)), h("td.r", {}, num(d.stable, 6)),
@@ -1087,7 +1113,7 @@ async function drawValidation(slot, r, t) {
       h("h3", {}, ref.label, " ", statusPill(ref.status)),
       !v
         ? h("p.muted", {}, ref.status === "no identity"
-          ? "The sweep could not identify this reference (it uses a form no reading of the code can follow), so it can never be validated."
+          ? "The benchmark could not identify the reference implementation, so it cannot associate this result with a validation record."
           : "No validation of this reference is recorded.")
         : [
           h("dl.stats", {},
@@ -1097,10 +1123,10 @@ async function drawValidation(slot, r, t) {
             h("div.stat", {}, h("dt", {}, "precision"), h("dd", {}, `${v.precision} bits`)),
             h("div.stat", {}, h("dt", {}, "validated"), h("dd", {}, v.validated_at))),
           v.reason ? h("p.note", {}, h("strong", {}, v.pass ? "" : "Failed: "), v.reason) : null,
-          h("p.note", {}, "The status is the harness's: a validation counts only if it was made by the current validation method, of exactly the identity the sweep recorded, judged against the latest version of the MPFR truth. ",
+          h("p.note", {}, "Validation must use the current method, the same reference implementation as this test, and the latest MPFR reference calculation. ",
             ref.vs.length > 1 ? `${ref.vs.length} validations of this reference are recorded; the latest is shown. ` : "",
-            "Sampled evidence, not a proof of a bound."),
-          h("details.fold.inner", {}, h("summary", {}, "How it was sampled, and with what"),
+            "These checks provide evidence from sampled inputs; they do not prove the error bound for every input."),
+          h("details.fold.inner", {}, h("summary", {}, "Sampling method and software versions"),
             h("p.note", {}, v.selection),
             h("dl.fingerprint", {},
               [["seed", v.seed], ["R", v.r_version], ["Rmpfr", v.rmpfr_version], ["MPFR", v.mpfr_version],
@@ -1109,12 +1135,12 @@ async function drawValidation(slot, r, t) {
           samples.length
             ? h("details.fold.inner", {}, h("summary", {}, `Worst samples (${samples.length} recorded)`),
               table([{ label: "source" }, { label: "x", align: "r" }, { label: "reference", align: "r" },
-                { label: "MPFR truth", align: "r" }, { label: "error, ulp", align: "r" }],
+                { label: "High-precision MPFR value", align: "r" }, { label: "error, ulp", align: "r" }],
               samples.slice().sort((a, b) => (b.err_ulp64 ?? 0) - (a.err_ulp64 ?? 0)).slice(0, 20).map((x) =>
                 h("tr", { class: x.pass === false ? "row-warn" : null },
                   h("td.small", {}, x.source),
                   h("td.r", {}, repro(num(x.x), s.result(x.cell_id, x.output) ?? r, x.x, x.bits, `validation sample (${x.source})`,
-                    [["harness ref", x.ref], ["MPFR truth", x.truth], ["error, f64 ulp", x.err_ulp64]])),
+                    [["harness ref", x.ref], ["High-precision MPFR value", x.truth], ["error, f64 ulp", x.err_ulp64]])),
                   h("td.r", {}, num(x.ref, 6)), h("td.r", {}, num(x.truth, 6)), h("td.r", {}, num(x.err_ulp64, 3))))))
             : null,
         ]));
@@ -1127,7 +1153,7 @@ async function drawValidation(slot, r, t) {
 // --- wiring ------------------------------------------------------------
 
 async function load(sourcePromise) {
-  setStatus("loading artifact…");
+  setStatus("Loading results…");
   const source = await sourcePromise;
   app.store = await openStore(source);
   app.chartCell = null;
@@ -1165,7 +1191,7 @@ addEventListener("hashchange", route);
   renderHeader();
   if (!app.deployed.length) {
     return setStatus(
-      "No artifact is deployed with this page. Download one from the releases and open it with the file picker above.",
+      "No results are deployed with this page. Download and extract a results archive from the project’s GitHub releases, then use Open downloaded results to select manifest.json and all Parquet files together.",
       "empty");
   }
   try {

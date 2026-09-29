@@ -6,7 +6,7 @@
 export const CLASSES = {
   normal: {
     label: "normal", long: "Normal inputs",
-    expect: "finite, not subnormal, inside the valid domain: a small relative error",
+    expect: "Finite, non-subnormal inputs within the valid domain; small relative errors are expected",
   },
   zero: {
     label: "±0", long: "±0",
@@ -14,7 +14,7 @@ export const CLASSES = {
   },
   subnormal: {
     label: "subnormal", long: "Subnormal inputs",
-    expect: "flushed to ±0 on entry by this backend: the result at ±0",
+    expect: "When the backend converts these inputs to zero, compare with the expected result for zero",
   },
   outside_domain: {
     label: "outside the domain", long: "Outside the valid domain",
@@ -22,7 +22,7 @@ export const CLASSES = {
   },
   inf_nan: {
     label: "±∞ & NaN", long: "±∞ and NaN inputs",
-    expect: "match base R exactly",
+    expect: "Match the reference exactly",
   },
 };
 
@@ -30,36 +30,36 @@ export const CLASSES = {
  * the fifth that validation adds). */
 export const CATEGORIES = {
   failure: {
-    label: "failure", cls: "warn",
-    hint: "no finite error on valid inputs, and no tested cause accounts for it",
+    label: "unexplained disagreement", cls: "warn",
+    hint: "Relative error is undefined or infinite, and no recognised limitation or undefined-domain convention explains the disagreement",
   },
   boundary: {
     label: "domain boundary", cls: "neutral",
-    hint: "at an endpoint of the valid input domain, where base R gives a limiting value or convention",
+    hint: "at an endpoint of the valid input domain, where the reference gives a limiting value or convention",
   },
   backend_limitation: {
     label: "backend limitation", cls: "neutral",
-    hint: "a subnormal input the backend flushed to a zero whose own result is right",
+    hint: "The backend converted a subnormal input to zero and returned the expected result for zero",
   },
   undefined_domain: {
     label: "undefined-domain convention", cls: "muted",
-    hint: "a gradient where both forward values are NaN: no derivative exists, and the sides differ only in convention. Set aside, and shown",
+    hint: "Both function values are NaN, so no derivative exists. Differences in gradient conventions are reported separately from unexplained failures",
   },
   reference_limitation: {
     label: "verified base R limitation", cls: "ok",
-    hint: "base R is off, anvl is accurate, both against a stable reference that passed validation at high precision. Set aside, and shown",
+    hint: "Base R exceeds its error tolerance while anvl meets its tolerance against a validated stable reference. Adjusted error statistics exclude these samples",
   },
 };
 
 export const CAUSES = {
   nan_input: "the input is NaN",
-  input_flushing: "subnormal input flushed to a zero whose result is right",
-  flush_inherits_zero_error: "subnormal input flushed to a zero whose result is wrong",
+  input_flushing: "Input converted to zero; result matches the expected value for zero",
+  flush_inherits_zero_error: "Input converted to zero; result for zero differs from the reference",
   domain_boundary: "an endpoint of the valid domain",
   outside_domain: "outside the valid domain",
   zero_input: "the input is ±0",
   inf_input: "the input is ±∞",
-  unidentified: "no tested cause",
+  unidentified: "Cause not identified by the benchmark",
 };
 
 /** Validation status of a reference, failing closed (reference_status()). */
@@ -67,7 +67,7 @@ export const REF_STATUS = {
   validated: { cls: "ok", label: "validated" },
   failed: { cls: "warn", label: "failed validation" },
   "not validated": { cls: "neutral", label: "not validated" },
-  "no identity": { cls: "warn", label: "no identity: can never validate" },
+  "no identity": { cls: "warn", label: "Reference identity unavailable" },
 };
 
 const n0 = (v) => (typeof v === "number" && !Number.isNaN(v) ? v : 0);

@@ -104,7 +104,7 @@ export async function fileSource(fileList) {
     if (m) files.set(m[1], f);
   }
   if (!manifestFile) {
-    throw new Error("no manifest.json among the selected files — select the whole artifact folder");
+    throw new Error("manifest.json is missing. Extract the results archive, then select manifest.json and all Parquet files together.");
   }
   const manifest = JSON.parse(await manifestFile.text());
   const buffer = memo((t) => {
