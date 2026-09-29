@@ -83,6 +83,9 @@ light and dark mode.
 
 ## How the results get here
 
+To generate cluster results, follow the [HPC workflow](hpc/README.md). That
+guide ends with a release ZIP; this section owns upload and deployment.
+
 Results are **never committed to this repository**. They are published as assets
 on a GitHub Release, and a workflow copies the chosen Release's assets into the
 Pages artifact at deploy time.
@@ -100,6 +103,16 @@ still never enter git history.
 Release asset (canonical)  ->  Actions downloads it  ->  Pages artifact  ->  browser
 ```
 
+Upload the generated ZIP to an existing release (replace the tag and filename):
+
+```bash
+gh release upload <tag> linux-x86_64-cpu.zip --repo louisaslett/anvl-bench
+```
+
+Use `--clobber` only when intentionally replacing an existing asset. Verify the
+artifact's coverage and manifest before upload; producing a ZIP does not certify
+that all sweep cells or reference checks succeeded.
+
 Which Release is deployed is recorded in the **`DEPLOY_RELEASE`** file at the
 root of this repository — one line holding a release tag. Deploying is therefore
 an ordinary commit:
@@ -112,6 +125,13 @@ git commit -am "Deploy v0.4.0" && git push
 The push triggers the workflow, and the diff is the record of which results went
 live and when. Naming a tag here is not the same as moving one: a Release is
 bound one-to-one to its tag, and this file just points at one.
+
+If the version is unchanged (for example, an additional platform has been tested),
+then directly run the Github Action to deploy site copying in the uploaded zip.
+
+```
+gh workflow run "Deploy site"
+```
 
 An empty file deploys the site with no data, which is a perfectly good state —
 the file picker still works.
@@ -128,9 +148,9 @@ and open them with the file picker in the page header. `fetch` is blocked on
 
 ### Release asset layout
 
-One `.zip` per (anvl version, platform, backend), holding a whole export at its
-root. The asset's basename becomes the artifact id and the directory it is
-unpacked into:
+Use one `.zip` per anvl version and platform, containing the selected anvl and
+JAX results together for comparison, with the export files at its root. The
+asset's basename becomes the artifact id and the directory it is unpacked into:
 
 ```
 darwin-arm64-cpu.zip
